@@ -224,14 +224,17 @@ export interface AuditLogRecord {
   createdAt: string;
 }
 
-const DEFAULT_DATA_DIR = path.resolve(__dirname, 'data');
+const PROJECT_ROOT = fs.existsSync(path.join(__dirname, 'package.json'))
+  ? __dirname
+  : path.resolve(__dirname, '..');
+const DEFAULT_DATA_DIR = path.resolve(PROJECT_ROOT, 'data');
 
 export function resolveEngineDataDir(): string {
   const configured = (process.env.JOBFOUNDS_DATA_DIR || '').trim();
   if (configured) {
     const resolved = path.resolve(configured);
     const tmpRoot = path.resolve(os.tmpdir());
-    const distRoot = path.resolve(__dirname, 'dist');
+    const distRoot = path.resolve(PROJECT_ROOT, 'dist');
     if (
       resolved === tmpRoot ||
       resolved.startsWith(`${tmpRoot}${path.sep}`) ||

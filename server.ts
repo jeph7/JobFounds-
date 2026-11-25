@@ -1368,9 +1368,11 @@ Return ONLY a valid JSON object in ${outputLang}:
 
   // Vite dev middleware or static production build
   const distPath = path.resolve(__dirname, 'dist');
+  const isCompiledServerJs = __filename.endsWith('.js');
   const isProd =
     process.env.NODE_ENV === 'production' ||
-    (process.env.npm_lifecycle_event === 'start' && fs.existsSync(path.join(distPath, 'index.html')));
+    ((isCompiledServerJs || process.env.npm_lifecycle_event === 'start') &&
+      fs.existsSync(path.join(distPath, 'index.html')));
   if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const hmrDisabled = process.env.DISABLE_HMR === 'true';

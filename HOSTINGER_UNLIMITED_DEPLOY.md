@@ -21,9 +21,10 @@ Architecture adaptée au plan **Hostinger Unlimited** (**2 CPU · 3 Go RAM · 50
 2. Associez le domaine **`jobfounds.com`** et activez le certificat **SSL HTTPS** automatique.
 3. Choisissez **Importer depuis GitHub** (recommandé) ou **Importer une archive ZIP** (sans `node_modules/`, sans `.env`, sans `data/`).
 4. Réglez les paramètres Node.js :
-   - **Version Node.js** : `22.x` (`>= 22.14.0`, requis pour `node:sqlite` et TypeScript natif)
-   - **Commande de build** : `npm run build`
-   - **Commande de démarrage** : `npm start` (exécute `node server.ts`)
+   - **Version Node.js** : `22.x` (`>= 22.14.0`, requis pour `node:sqlite`)
+   - **Point d’entrée (`main`)** : `server.js` (compilé automatiquement depuis `server.ts`)
+   - **Commande de build** : `npm run build` (compile le frontend `dist/` + `server.js` + `scripts/cron-worker.js`)
+   - **Commande de démarrage** : `npm start` (exécute `node server.js`)
 
 ---
 

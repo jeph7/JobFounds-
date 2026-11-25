@@ -1224,6 +1224,8 @@ function collectProductionBundleEntries(): string[] {
   const candidates = [
     'dist',
     'public',
+    'server.js',
+    'scripts/cron-worker.js',
     'scripts/cron-worker.ts',
     'package.json',
     'package-lock.json',
@@ -1612,7 +1614,7 @@ async function executeDeploymentPipeline(
         `cd ${shellSingleQuote(absRemoteDir)}`,
         'mkdir -p tmp logs data',
         'touch tmp/restart.txt',
-        'if command -v pm2 >/dev/null 2>&1; then (pm2 reload jobfounds --update-env || pm2 start server.ts --name jobfounds --interpreter node); pm2 save || true; echo "RESTART_PM2"; else echo "RESTART_PASSENGER"; fi',
+        'if command -v pm2 >/dev/null 2>&1; then (pm2 reload jobfounds --update-env || pm2 start server.js --name jobfounds); pm2 save || true; echo "RESTART_PM2"; else echo "RESTART_PASSENGER"; fi',
       ].join(' && ');
 
       const restartRes = await execSshCommand(sshClient, restartCmd, 60_000);

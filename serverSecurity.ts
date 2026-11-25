@@ -6,6 +6,9 @@ import { fileURLToPath } from 'url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const PROJECT_ROOT = fs.existsSync(path.join(__dirname, 'package.json'))
+  ? __dirname
+  : path.resolve(__dirname, '..');
 
 export interface VerifiedAuthUser {
   uid: string;
@@ -21,7 +24,7 @@ export interface AuthedRequest extends Request {
 let FIREBASE_PROJECT_ID = String(process.env.FIREBASE_PROJECT_ID || '').trim();
 if (!FIREBASE_PROJECT_ID) {
   try {
-    const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
+    const cfgPath = path.resolve(PROJECT_ROOT, 'firebase-applet-config.json');
     if (fs.existsSync(cfgPath)) {
       const raw = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
       FIREBASE_PROJECT_ID = String(raw.projectId || '').trim();

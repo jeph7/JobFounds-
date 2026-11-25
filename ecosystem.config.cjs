@@ -2,8 +2,7 @@ module.exports = {
   apps: [
     {
       name: 'jobfounds',
-      script: 'node_modules/.bin/tsx',
-      args: 'server.ts',
+      script: 'server.js',
       cwd: __dirname,
       // Keep instances at 1 so SQLite WAL + the autonomous background worker loop run cleanly without lock contention
       instances: 1,
