@@ -1,0 +1,6 @@
+{
+  "name": "JOB FONDS",
+  "description": "Global AI Career & Recruitment Intelligence Platform — Find Real Jobs, Discover Hidden Opportunities, Verify Offers, Build ATS-Ready CVs, and Connect Globally.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

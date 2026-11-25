@@ -1,0 +1,244 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Private user account and candidate/recruiter preferences (contains PII, owner-only access).",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "accountRole": { "type": "string", "enum": ["candidate", "recruiter"] },
+        "lang": { "type": "string", "enum": ["fr", "en", "es", "de", "pt", "ar"] },
+        "discoverable": { "type": "boolean" },
+        "gdprConsent": { "type": "boolean" },
+        "companyName": { "type": "string", "maxLength": 140 },
+        "companyWebsite": { "type": "string", "maxLength": 300 },
+        "profile": { "type": "object" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "fullName", "accountRole", "lang", "discoverable", "gdprConsent", "createdAt", "updatedAt"]
+    },
+    "UserCv": {
+      "title": "UserCv",
+      "description": "Private CV version stored under a user account.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "versionName": { "type": "string", "maxLength": 140 },
+        "template": { "type": "string", "enum": ["executive", "structured", "international"] },
+        "fullName": { "type": "string", "maxLength": 120 },
+        "headline": { "type": "string", "maxLength": 220 },
+        "email": { "type": "string", "maxLength": 200 },
+        "phone": { "type": "string", "maxLength": 60 },
+        "location": { "type": "string", "maxLength": 160 },
+        "linkedin": { "type": "string", "maxLength": 240 },
+        "summary": { "type": "string", "maxLength": 3000 },
+        "experiences": { "type": "array" },
+        "education": { "type": "array" },
+        "skills": { "type": "array" },
+        "languages": { "type": "array" },
+        "updatedDate": { "type": "string", "maxLength": 32 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "versionName", "template", "fullName", "createdAt", "updatedAt"]
+    },
+    "TrackedApplication": {
+      "title": "TrackedApplication",
+      "description": "Private candidate recruitment CRM record tracking 10 lifecycle statuses, contact, CV used, authorization gate, responses, and follow-ups.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "role": { "type": "string", "maxLength": 180 },
+        "company": { "type": "string", "maxLength": 140 },
+        "companyId": { "type": "string", "maxLength": 128 },
+        "location": { "type": "string", "maxLength": 140 },
+        "type": { "type": "string", "enum": ["Confirmed Job", "Spontaneous"] },
+        "stage": {
+          "type": "string",
+          "enum": [
+            "Opportunity Identified",
+            "Application Prepared",
+            "Awaiting Authorization",
+            "Application Sent",
+            "Message Received",
+            "Under Review",
+            "Interview Scheduled",
+            "Offer Received",
+            "Rejected",
+            "Completed",
+            "To Prepare",
+            "Applied",
+            "Spontaneous Sent",
+            "Interviewing",
+            "Offer",
+            "Archived"
+          ]
+        },
+        "dateAdded": { "type": "string", "maxLength": 32 },
+        "sentDate": { "type": "string", "maxLength": 32 },
+        "followUpDate": { "type": "string", "maxLength": 32 },
+        "interviewDate": { "type": "string", "maxLength": 40 },
+        "sourceUrl": { "type": "string", "maxLength": 500 },
+        "salaryRange": { "type": "string", "maxLength": 120 },
+        "contactName": { "type": "string", "maxLength": 140 },
+        "contactRole": { "type": "string", "maxLength": 140 },
+        "contactChannel": { "type": "string", "maxLength": 200 },
+        "cvVersionId": { "type": "string", "maxLength": 128 },
+        "cvVersionName": { "type": "string", "maxLength": 140 },
+        "coverLetterUsed": { "type": "string", "maxLength": 2000 },
+        "responseReceived": { "type": "boolean" },
+        "responseSummary": { "type": "string", "maxLength": 1000 },
+        "responseSource": { "type": "string", "enum": ["none", "manual_log", "in_app_message", "gmail_sync"] },
+        "nextAction": { "type": "string", "maxLength": 300 },
+        "approvalStatus": { "type": "string", "enum": ["not_required", "pending_user_approval", "approved_by_user"] },
+        "followUpCount": { "type": "integer" },
+        "lastFollowUpAt": { "type": "string", "maxLength": 32 },
+        "notes": { "type": "string", "maxLength": 2000 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "role", "company", "location", "type", "stage", "dateAdded", "createdAt", "updatedAt"]
+    },
+    "WatchlistAlert": {
+      "title": "WatchlistAlert",
+      "description": "Saved search query or watched company for ongoing opportunity alerts.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "kind": { "type": "string", "enum": ["company", "search"] },
+        "label": { "type": "string", "maxLength": 140 },
+        "country": { "type": "string", "maxLength": 80 },
+        "sector": { "type": "string", "maxLength": 120 },
+        "lastChecked": { "type": "string", "maxLength": 40 },
+        "lastSignalSummary": { "type": "string", "maxLength": 1000 },
+        "unreadAlerts": { "type": "integer" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "kind", "label", "unreadAlerts", "createdAt", "updatedAt"]
+    },
+    "PublicCandidate": {
+      "title": "PublicCandidate",
+      "description": "Non-PII opt-in candidate profile discoverable by authenticated recruiters.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "displayName": { "type": "string", "maxLength": 120 },
+        "headline": { "type": "string", "maxLength": 200 },
+        "yearsExperience": { "type": "integer" },
+        "highestDegree": { "type": "string", "maxLength": 160 },
+        "skills": { "type": "array" },
+        "languages": { "type": "array" },
+        "preferredCountries": { "type": "array" },
+        "preferredWorkModes": { "type": "array" },
+        "availability": { "type": "string", "maxLength": 120 },
+        "isOpenToRecruiters": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "displayName", "headline", "yearsExperience", "isOpenToRecruiters", "createdAt", "updatedAt"]
+    },
+    "CompanyJob": {
+      "title": "CompanyJob",
+      "description": "Job posting published directly by a verified employer/recruiter account.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recruiterId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "companyName": { "type": "string", "maxLength": 140 },
+        "companyWebsite": { "type": "string", "maxLength": 300 },
+        "title": { "type": "string", "maxLength": 180 },
+        "country": { "type": "string", "maxLength": 80 },
+        "city": { "type": "string", "maxLength": 80 },
+        "workMode": { "type": "string", "enum": ["Remote", "Hybrid", "On-site"] },
+        "contractType": { "type": "string", "enum": ["Full-time", "Part-time", "Contract", "Internship", "Freelance"] },
+        "experienceLevel": { "type": "string", "maxLength": 60 },
+        "degreeRequired": { "type": "string", "maxLength": 140 },
+        "salaryRange": { "type": "string", "maxLength": 120 },
+        "skills": { "type": "array" },
+        "languages": { "type": "array" },
+        "description": { "type": "string", "maxLength": 4000 },
+        "visaSponsorship": { "type": "string", "maxLength": 60 },
+        "verificationStatus": { "type": "string", "enum": ["Verified", "Partially Verified", "Unverified"] },
+        "status": { "type": "string", "enum": ["open", "closed"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "recruiterId", "companyName", "title", "country", "city", "workMode", "contractType", "description", "verificationStatus", "status", "createdAt", "updatedAt"]
+    },
+    "Conversation": {
+      "title": "Conversation",
+      "description": "Direct messaging thread between a candidate and a recruiter.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "candidateId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recruiterId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "candidateName": { "type": "string", "maxLength": 120 },
+        "recruiterName": { "type": "string", "maxLength": 120 },
+        "companyName": { "type": "string", "maxLength": 140 },
+        "jobTitle": { "type": "string", "maxLength": 180 },
+        "lastMessage": { "type": "string", "maxLength": 500 },
+        "status": { "type": "string", "enum": ["active", "archived"] },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "candidateId", "recruiterId", "candidateName", "recruiterName", "companyName", "jobTitle", "status", "createdAt", "updatedAt"]
+    },
+    "ConversationMessage": {
+      "title": "ConversationMessage",
+      "description": "Individual message inside a candidate-recruiter conversation.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "conversationId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "recipientId": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "senderName": { "type": "string", "maxLength": 120 },
+        "body": { "type": "string", "maxLength": 2500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "conversationId", "senderId", "recipientId", "senderName", "body", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "Private user account, PII, and workspace preferences."
+    },
+    "/users/{userId}/cvs/{cvId}": {
+      "schema": { "$ref": "#/entities/UserCv" },
+      "description": "User's private CV versions."
+    },
+    "/users/{userId}/applications/{appId}": {
+      "schema": { "$ref": "#/entities/TrackedApplication" },
+      "description": "User's tracked applications and follow-up reminders."
+    },
+    "/users/{userId}/watchlist/{watchId}": {
+      "schema": { "$ref": "#/entities/WatchlistAlert" },
+      "description": "User's saved searches and watched company alerts."
+    },
+    "/publicCandidates/{userId}": {
+      "schema": { "$ref": "#/entities/PublicCandidate" },
+      "description": "PII-free opt-in candidate directory for recruiters."
+    },
+    "/companyJobs/{jobId}": {
+      "schema": { "$ref": "#/entities/CompanyJob" },
+      "description": "Verified employer job postings."
+    },
+    "/conversations/{conversationId}": {
+      "schema": { "$ref": "#/entities/Conversation" },
+      "description": "Direct messaging threads between candidates and recruiters."
+    },
+    "/conversations/{conversationId}/messages/{messageId}": {
+      "schema": { "$ref": "#/entities/ConversationMessage" },
+      "description": "Messages belonging to a direct conversation."
+    }
+  }
+}

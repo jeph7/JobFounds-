@@ -1,0 +1,92 @@
+@import "tailwindcss";
+
+:root {
+  /* JOBFOUNDS Official Visual Identity Tokens */
+  --jf-deep-navy: #06132F;
+  --jf-dark-blue: #102B52;
+  --jf-interactive-blue: #287BC7;
+  --jf-interactive-blue-hover: #1E65A7;
+  --jf-sky-blue: #A9D8F5;
+  --jf-soft-blue: #D5EBFA;
+  --jf-ice-white: #F4F8FC;
+  --jf-white: #FFFFFF;
+  --jf-border: #D5E4F2;
+  --jf-border-strong: #B3CBE2;
+  --jf-text-primary: #06132F;
+  --jf-text-secondary: #1F385C;
+  --jf-text-muted: #556E91;
+}
+
+@theme {
+  /* Official Typography */
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Manrope", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, monospace;
+
+  /* Named JOBFOUNDS Brand Tokens */
+  --color-jf-navy: #06132F;
+  --color-jf-dark: #102B52;
+  --color-jf-blue: #287BC7;
+  --color-jf-blue-hover: #1E65A7;
+  --color-jf-sky: #A9D8F5;
+  --color-jf-soft: #D5EBFA;
+  --color-jf-ice: #F4F8FC;
+  --color-jf-border: #D5E4F2;
+
+  /* Calibrate Tailwind slate & blue scales strictly to the JOBFOUNDS Navy + Sky Blue palette */
+  --color-slate-50: #F4F8FC;
+  --color-slate-100: #E8F2FA;
+  --color-slate-200: #D5E4F2;
+  --color-slate-300: #B3CBE2;
+  --color-slate-400: #7B95B5;
+  --color-slate-500: #556E91;
+  --color-slate-600: #365075;
+  --color-slate-700: #1D375C;
+  --color-slate-800: #102B52;
+  --color-slate-900: #06132F;
+  --color-slate-950: #040D21;
+
+  --color-blue-50: #EAF4FD;
+  --color-blue-100: #D5EBFA;
+  --color-blue-200: #A9D8F5;
+  --color-blue-300: #7BC0EC;
+  --color-blue-400: #4EA3DF;
+  --color-blue-500: #338BD4;
+  --color-blue-600: #287BC7;
+  --color-blue-700: #287BC7;
+  --color-blue-800: #1E65A7;
+  --color-blue-900: #102B52;
+  --color-blue-950: #06132F;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    background-color: var(--jf-ice-white);
+    color: var(--jf-text-primary);
+    scroll-behavior: smooth;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-display);
+    text-wrap: balance;
+    letter-spacing: -0.015em;
+  }
+
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+
+  input, select, textarea {
+    color: var(--jf-deep-navy);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

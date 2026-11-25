@@ -1,0 +1,625 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Pillar 0: Global Default-Deny Catch-All
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // -------------------------------------------------------------------------
+    // Global Hardened Primitives
+    // -------------------------------------------------------------------------
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'guerrierjephly@gmail.com'
+      );
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBoundedStringList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || arr[0] is string);
+    }
+
+    function isBoundedMapList(arr, maxLen) {
+      return arr is list && arr.size() <= maxLen && (arr.size() == 0 || arr[0] is map);
+    }
+
+    // -------------------------------------------------------------------------
+    // Entity Validation Blueprints (Pillar 2: Anti-Update-Gap)
+    // -------------------------------------------------------------------------
+    function isValidUserAccount(data, userId) {
+      return data.keys().hasAll([
+          'uid', 'email', 'fullName', 'accountRole', 'lang',
+          'discoverable', 'gdprConsent', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'uid', 'email', 'fullName', 'accountRole', 'lang',
+          'discoverable', 'gdprConsent', 'companyName', 'companyWebsite',
+          'profile', 'createdAt', 'updatedAt'
+        ])
+        && data.uid == userId
+        && data.uid == request.auth.uid
+        && data.email is string && data.email.size() >= 3 && data.email.size() <= 200
+        && data.fullName is string && data.fullName.size() >= 1 && data.fullName.size() <= 120
+        && data.accountRole in ['candidate', 'recruiter']
+        && data.lang in ['fr', 'en', 'es', 'de', 'pt', 'ar']
+        && data.discoverable is bool
+        && data.gdprConsent is bool
+        && (!('companyName' in data) || (data.companyName is string && data.companyName.size() <= 140))
+        && (!('companyWebsite' in data) || (data.companyWebsite is string && data.companyWebsite.size() <= 300))
+        && (!('profile' in data) || (data.profile is map && data.profile.size() <= 30))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidUserCv(data, userId, cvId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'versionName', 'template', 'fullName', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'versionName', 'template', 'fullName', 'headline',
+          'email', 'phone', 'location', 'linkedin', 'summary',
+          'experiences', 'education', 'skills', 'languages', 'updatedDate',
+          'createdAt', 'updatedAt'
+        ])
+        && data.id == cvId
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.versionName is string && data.versionName.size() >= 1 && data.versionName.size() <= 140
+        && data.template in ['executive', 'structured', 'international']
+        && data.fullName is string && data.fullName.size() <= 120
+        && (!('headline' in data) || (data.headline is string && data.headline.size() <= 220))
+        && (!('email' in data) || (data.email is string && data.email.size() <= 200))
+        && (!('phone' in data) || (data.phone is string && data.phone.size() <= 60))
+        && (!('location' in data) || (data.location is string && data.location.size() <= 160))
+        && (!('linkedin' in data) || (data.linkedin is string && data.linkedin.size() <= 240))
+        && (!('summary' in data) || (data.summary is string && data.summary.size() <= 3000))
+        && (!('experiences' in data) || isBoundedMapList(data.experiences, 25))
+        && (!('education' in data) || isBoundedMapList(data.education, 15))
+        && (!('skills' in data) || isBoundedStringList(data.skills, 40))
+        && (!('languages' in data) || isBoundedStringList(data.languages, 15))
+        && (!('updatedDate' in data) || (data.updatedDate is string && data.updatedDate.size() <= 32))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidApplication(data, userId, appId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'role', 'company', 'location',
+          'type', 'stage', 'dateAdded', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'role', 'company', 'companyId', 'location',
+          'type', 'stage', 'dateAdded', 'sentDate', 'followUpDate', 'interviewDate',
+          'sourceUrl', 'salaryRange', 'contactName', 'contactRole', 'contactChannel',
+          'cvVersionId', 'cvVersionName', 'coverLetterUsed', 'responseReceived',
+          'responseSummary', 'responseSource', 'nextAction', 'approvalStatus',
+          'followUpCount', 'lastFollowUpAt', 'notes', 'createdAt', 'updatedAt'
+        ])
+        && data.id == appId
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.role is string && data.role.size() >= 1 && data.role.size() <= 180
+        && data.company is string && data.company.size() >= 1 && data.company.size() <= 140
+        && (!('companyId' in data) || (data.companyId is string && data.companyId.size() <= 128))
+        && data.location is string && data.location.size() <= 140
+        && data.type in ['Confirmed Job', 'Spontaneous']
+        && data.stage in [
+          'Opportunity Identified', 'Application Prepared', 'Awaiting Authorization',
+          'Application Sent', 'Message Received', 'Under Review',
+          'Interview Scheduled', 'Offer Received', 'Rejected', 'Completed',
+          'To Prepare', 'Applied', 'Spontaneous Sent', 'Interviewing', 'Offer', 'Archived'
+        ]
+        && data.dateAdded is string && data.dateAdded.size() <= 32
+        && (!('sentDate' in data) || (data.sentDate is string && data.sentDate.size() <= 32))
+        && (!('followUpDate' in data) || (data.followUpDate is string && data.followUpDate.size() <= 32))
+        && (!('interviewDate' in data) || (data.interviewDate is string && data.interviewDate.size() <= 40))
+        && (!('sourceUrl' in data) || (data.sourceUrl is string && data.sourceUrl.size() <= 500))
+        && (!('salaryRange' in data) || (data.salaryRange is string && data.salaryRange.size() <= 120))
+        && (!('contactName' in data) || (data.contactName is string && data.contactName.size() <= 140))
+        && (!('contactRole' in data) || (data.contactRole is string && data.contactRole.size() <= 140))
+        && (!('contactChannel' in data) || (data.contactChannel is string && data.contactChannel.size() <= 200))
+        && (!('cvVersionId' in data) || (data.cvVersionId is string && data.cvVersionId.size() <= 128))
+        && (!('cvVersionName' in data) || (data.cvVersionName is string && data.cvVersionName.size() <= 140))
+        && (!('coverLetterUsed' in data) || (data.coverLetterUsed is string && data.coverLetterUsed.size() <= 2000))
+        && (!('responseReceived' in data) || data.responseReceived is bool)
+        && (!('responseSummary' in data) || (data.responseSummary is string && data.responseSummary.size() <= 1000))
+        && (!('responseSource' in data) || data.responseSource in ['none', 'manual_log', 'in_app_message', 'gmail_sync'])
+        && (!('nextAction' in data) || (data.nextAction is string && data.nextAction.size() <= 300))
+        && (!('approvalStatus' in data) || data.approvalStatus in ['not_required', 'pending_user_approval', 'approved_by_user'])
+        && (!('followUpCount' in data) || (data.followUpCount is int && data.followUpCount >= 0 && data.followUpCount <= 20))
+        && (!('lastFollowUpAt' in data) || (data.lastFollowUpAt is string && data.lastFollowUpAt.size() <= 32))
+        && (!('notes' in data) || (data.notes is string && data.notes.size() <= 2000))
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidWatchlist(data, userId, watchId) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'kind', 'label', 'unreadAlerts', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'ownerId', 'kind', 'label', 'country', 'sector',
+          'lastChecked', 'lastSignalSummary', 'unreadAlerts', 'createdAt', 'updatedAt'
+        ])
+        && data.id == watchId
+        && data.ownerId == userId
+        && data.ownerId == request.auth.uid
+        && data.kind in ['company', 'search']
+        && data.label is string && data.label.size() >= 1 && data.label.size() <= 140
+        && (!('country' in data) || (data.country is string && data.country.size() <= 80))
+        && (!('sector' in data) || (data.sector is string && data.sector.size() <= 120))
+        && (!('lastChecked' in data) || (data.lastChecked is string && data.lastChecked.size() <= 40))
+        && (!('lastSignalSummary' in data) || (data.lastSignalSummary is string && data.lastSignalSummary.size() <= 1000))
+        && data.unreadAlerts is int && data.unreadAlerts >= 0 && data.unreadAlerts <= 500
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidPublicCandidate(data, userId) {
+      return data.keys().hasAll([
+          'userId', 'displayName', 'headline', 'yearsExperience',
+          'isOpenToRecruiters', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'userId', 'displayName', 'headline', 'yearsExperience',
+          'highestDegree', 'skills', 'languages', 'preferredCountries',
+          'preferredWorkModes', 'availability', 'isOpenToRecruiters',
+          'createdAt', 'updatedAt'
+        ])
+        && data.userId == userId
+        && data.userId == request.auth.uid
+        && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120
+        && data.headline is string && data.headline.size() >= 1 && data.headline.size() <= 200
+        && data.yearsExperience is int && data.yearsExperience >= 0 && data.yearsExperience <= 60
+        && (!('highestDegree' in data) || (data.highestDegree is string && data.highestDegree.size() <= 160))
+        && (!('skills' in data) || isBoundedStringList(data.skills, 25))
+        && (!('languages' in data) || isBoundedStringList(data.languages, 12))
+        && (!('preferredCountries' in data) || isBoundedStringList(data.preferredCountries, 20))
+        && (!('preferredWorkModes' in data) || isBoundedStringList(data.preferredWorkModes, 3))
+        && (!('availability' in data) || (data.availability is string && data.availability.size() <= 120))
+        && data.isOpenToRecruiters is bool
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidCompanyJob(data, jobId) {
+      return data.keys().hasAll([
+          'id', 'recruiterId', 'companyName', 'title', 'country', 'city',
+          'workMode', 'contractType', 'description', 'verificationStatus',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'recruiterId', 'companyName', 'companyWebsite', 'title',
+          'country', 'city', 'workMode', 'contractType', 'experienceLevel',
+          'degreeRequired', 'salaryRange', 'skills', 'languages',
+          'description', 'visaSponsorship', 'verificationStatus',
+          'status', 'createdAt', 'updatedAt'
+        ])
+        && data.id == jobId
+        && data.recruiterId is string && isValidId(data.recruiterId)
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 140
+        && (!('companyWebsite' in data) || (data.companyWebsite is string && data.companyWebsite.size() <= 300))
+        && data.title is string && data.title.size() >= 2 && data.title.size() <= 180
+        && data.country is string && data.country.size() >= 2 && data.country.size() <= 80
+        && data.city is string && data.city.size() >= 1 && data.city.size() <= 80
+        && data.workMode in ['Remote', 'Hybrid', 'On-site']
+        && data.contractType in ['Full-time', 'Part-time', 'Contract', 'Internship', 'Freelance']
+        && (!('experienceLevel' in data) || (data.experienceLevel is string && data.experienceLevel.size() <= 60))
+        && (!('degreeRequired' in data) || (data.degreeRequired is string && data.degreeRequired.size() <= 140))
+        && (!('salaryRange' in data) || (data.salaryRange is string && data.salaryRange.size() <= 120))
+        && (!('skills' in data) || isBoundedStringList(data.skills, 25))
+        && (!('languages' in data) || isBoundedStringList(data.languages, 10))
+        && data.description is string && data.description.size() >= 10 && data.description.size() <= 4000
+        && (!('visaSponsorship' in data) || (data.visaSponsorship is string && data.visaSponsorship.size() <= 60))
+        && data.verificationStatus in ['Verified', 'Partially Verified', 'Unverified']
+        && data.status in ['open', 'closed']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidConversation(data, conversationId) {
+      return data.keys().hasAll([
+          'id', 'candidateId', 'recruiterId', 'candidateName', 'recruiterName',
+          'companyName', 'jobTitle', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'candidateId', 'recruiterId', 'candidateName', 'recruiterName',
+          'companyName', 'jobTitle', 'lastMessage', 'status', 'createdAt', 'updatedAt'
+        ])
+        && data.id == conversationId
+        && isValidId(data.candidateId)
+        && isValidId(data.recruiterId)
+        && data.candidateId != data.recruiterId
+        && data.candidateName is string && data.candidateName.size() >= 1 && data.candidateName.size() <= 120
+        && data.recruiterName is string && data.recruiterName.size() >= 1 && data.recruiterName.size() <= 120
+        && data.companyName is string && data.companyName.size() >= 1 && data.companyName.size() <= 140
+        && data.jobTitle is string && data.jobTitle.size() >= 1 && data.jobTitle.size() <= 180
+        && (!('lastMessage' in data) || (data.lastMessage is string && data.lastMessage.size() <= 500))
+        && data.status in ['active', 'archived']
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMessage(data, conversationId, messageId) {
+      return data.keys().hasAll([
+          'id', 'conversationId', 'senderId', 'recipientId', 'senderName', 'body', 'createdAt'
+        ])
+        && data.keys().hasOnly([
+          'id', 'conversationId', 'senderId', 'recipientId', 'senderName', 'body', 'createdAt'
+        ])
+        && data.id == messageId
+        && data.conversationId == conversationId
+        && data.senderId == request.auth.uid
+        && isValidId(data.recipientId)
+        && data.senderId != data.recipientId
+        && data.senderName is string && data.senderName.size() >= 1 && data.senderName.size() <= 120
+        && data.body is string && data.body.size() >= 1 && data.body.size() <= 2500
+        && data.createdAt is timestamp;
+    }
+
+    // -------------------------------------------------------------------------
+    // Collection Rules
+    // -------------------------------------------------------------------------
+
+    match /test/connection {
+      allow get: if isSignedIn();
+    }
+
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && isOwner(adminId);
+      allow list, create, update, delete: if false;
+    }
+
+    // 1. Private User Accounts (PII-isolated)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isAdmin();
+
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidUserAccount(incoming(), userId)
+        && incoming().uid == existing().uid
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            isVerifiedOwner(userId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'fullName', 'accountRole', 'lang', 'discoverable', 'gdprConsent',
+              'companyName', 'companyWebsite', 'profile', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
+
+      // 1a. Private CV Versions
+      match /cvs/{cvId} {
+        allow get: if isValidId(userId) && isValidId(cvId) && (isOwner(userId) || isAdmin());
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(cvId)
+          && isValidUserCv(incoming(), userId, cvId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(cvId)
+          && isValidUserCv(incoming(), userId, cvId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              isVerifiedOwner(userId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'versionName', 'template', 'fullName', 'headline', 'email',
+                'phone', 'location', 'linkedin', 'summary', 'experiences',
+                'education', 'skills', 'languages', 'updatedDate', 'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isValidId(userId) && isValidId(cvId) && (isVerifiedOwner(userId) || isAdmin());
+      }
+
+      // 1b. Private Application Tracker & Follow-Up Reminders
+      match /applications/{appId} {
+        allow get: if isValidId(userId) && isValidId(appId) && (isOwner(userId) || isAdmin());
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(appId)
+          && isValidApplication(incoming(), userId, appId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(appId)
+          && isValidApplication(incoming(), userId, appId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              isVerifiedOwner(userId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'role', 'company', 'companyId', 'location', 'type', 'stage',
+                'sentDate', 'followUpDate', 'interviewDate', 'sourceUrl', 'salaryRange',
+                'contactName', 'contactRole', 'contactChannel', 'cvVersionId', 'cvVersionName',
+                'coverLetterUsed', 'responseReceived', 'responseSummary', 'responseSource',
+                'nextAction', 'approvalStatus', 'followUpCount', 'lastFollowUpAt',
+                'notes', 'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isValidId(userId) && isValidId(appId) && (isVerifiedOwner(userId) || isAdmin());
+      }
+
+      // 1c. Private Watchlist & Alert Subscriptions
+      match /watchlist/{watchId} {
+        allow get: if isValidId(userId) && isValidId(watchId) && (isOwner(userId) || isAdmin());
+        allow list: if isSignedIn() && (resource.data.ownerId == request.auth.uid || isAdmin());
+
+        allow create: if isVerifiedOwner(userId)
+          && isValidId(userId)
+          && isValidId(watchId)
+          && isValidWatchlist(incoming(), userId, watchId)
+          && incoming().createdAt == request.time
+          && incoming().updatedAt == request.time
+          && exists(/databases/$(database)/documents/users/$(userId));
+
+        allow update: if isVerifiedUser()
+          && isValidId(userId)
+          && isValidId(watchId)
+          && isValidWatchlist(incoming(), userId, watchId)
+          && incoming().id == existing().id
+          && incoming().ownerId == existing().ownerId
+          && incoming().createdAt == existing().createdAt
+          && incoming().updatedAt == request.time
+          && (
+            isAdmin() ||
+            (
+              isVerifiedOwner(userId) &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'label', 'country', 'sector', 'lastChecked',
+                'lastSignalSummary', 'unreadAlerts', 'updatedAt'
+              ])
+            )
+          );
+
+        allow delete: if isValidId(userId) && isValidId(watchId) && (isVerifiedOwner(userId) || isAdmin());
+      }
+    }
+
+    // 2. PII-Free Opt-In Public Candidate Directory (Split Collection)
+    match /publicCandidates/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && (
+        existing().isOpenToRecruiters == true || isOwner(userId) || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.isOpenToRecruiters == true || resource.data.userId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isVerifiedOwner(userId)
+        && isValidId(userId)
+        && isValidPublicCandidate(incoming(), userId)
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/users/$(userId));
+
+      allow update: if isVerifiedUser()
+        && isValidId(userId)
+        && isValidPublicCandidate(incoming(), userId)
+        && incoming().userId == existing().userId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            isVerifiedOwner(userId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName', 'headline', 'yearsExperience', 'highestDegree',
+              'skills', 'languages', 'preferredCountries', 'preferredWorkModes',
+              'availability', 'isOpenToRecruiters', 'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(userId) && (isVerifiedOwner(userId) || isAdmin());
+    }
+
+    // 3. Employer / Recruiter Job Postings (Terminal Locking + No Self-Verified Spoofing)
+    match /companyJobs/{jobId} {
+      allow get: if isValidId(jobId) && isSignedIn() && (
+        existing().status == 'open' || existing().recruiterId == request.auth.uid || isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.status == 'open' || resource.data.recruiterId == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isVerifiedUser()
+        && isValidId(jobId)
+        && isValidCompanyJob(incoming(), jobId)
+        && incoming().recruiterId == request.auth.uid
+        && incoming().status == 'open'
+        && (isAdmin() || incoming().verificationStatus in ['Partially Verified', 'Unverified'])
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+
+      allow update: if isVerifiedUser()
+        && isValidId(jobId)
+        && isValidCompanyJob(incoming(), jobId)
+        && incoming().id == existing().id
+        && incoming().recruiterId == existing().recruiterId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().status == 'open'
+            && existing().recruiterId == request.auth.uid
+            && incoming().verificationStatus == existing().verificationStatus
+            && (
+              // Action 1: Edit open job details
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'companyName', 'companyWebsite', 'title', 'country', 'city',
+                'workMode', 'contractType', 'experienceLevel', 'degreeRequired',
+                'salaryRange', 'skills', 'languages', 'description',
+                'visaSponsorship', 'updatedAt'
+              ]) ||
+              // Action 2: Close job (terminal transition)
+              (
+                incoming().status == 'closed' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              )
+            )
+          )
+        );
+
+      allow delete: if isValidId(jobId) && isVerifiedUser() && (
+        existing().recruiterId == request.auth.uid || isAdmin()
+      );
+    }
+
+    // 4. Direct Messaging Conversations (Candidate <-> Recruiter)
+    match /conversations/{conversationId} {
+      allow get: if isValidId(conversationId) && isSignedIn() && (
+        existing().candidateId == request.auth.uid ||
+        existing().recruiterId == request.auth.uid ||
+        isAdmin()
+      );
+      allow list: if isSignedIn() && (
+        resource.data.candidateId == request.auth.uid ||
+        resource.data.recruiterId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow create: if isVerifiedUser()
+        && isValidId(conversationId)
+        && isValidConversation(incoming(), conversationId)
+        && (incoming().candidateId == request.auth.uid || incoming().recruiterId == request.auth.uid)
+        && incoming().status == 'active'
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid));
+
+      allow update: if isVerifiedUser()
+        && isValidId(conversationId)
+        && isValidConversation(incoming(), conversationId)
+        && incoming().id == existing().id
+        && incoming().candidateId == existing().candidateId
+        && incoming().recruiterId == existing().recruiterId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            existing().status == 'active'
+            && (existing().candidateId == request.auth.uid || existing().recruiterId == request.auth.uid)
+            && (
+              // Action 1: Update last message preview
+              incoming().diff(existing()).affectedKeys().hasOnly(['lastMessage', 'updatedAt']) ||
+              // Action 2: Archive thread (terminal transition)
+              (
+                incoming().status == 'archived' &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+              )
+            )
+          )
+        );
+
+      allow delete: if isValidId(conversationId) && isAdmin();
+
+      // 4a. Messages Subcollection (Master Gate + Immutable History)
+      match /messages/{messageId} {
+        allow get: if isValidId(conversationId)
+          && isValidId(messageId)
+          && isSignedIn()
+          && (
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.candidateId == request.auth.uid ||
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.recruiterId == request.auth.uid ||
+            isAdmin()
+          );
+
+        allow list: if isSignedIn() && (
+          resource.data.senderId == request.auth.uid ||
+          resource.data.recipientId == request.auth.uid ||
+          isAdmin()
+        );
+
+        allow create: if isVerifiedUser()
+          && isValidId(conversationId)
+          && isValidId(messageId)
+          && isValidMessage(incoming(), conversationId, messageId)
+          && incoming().createdAt == request.time
+          && (
+            get(/databases/$(database)/documents/conversations/$(conversationId)).data.status == 'active'
+            && (
+              (
+                get(/databases/$(database)/documents/conversations/$(conversationId)).data.candidateId == request.auth.uid &&
+                get(/databases/$(database)/documents/conversations/$(conversationId)).data.recruiterId == incoming().recipientId
+              ) ||
+              (
+                get(/databases/$(database)/documents/conversations/$(conversationId)).data.recruiterId == request.auth.uid &&
+                get(/databases/$(database)/documents/conversations/$(conversationId)).data.candidateId == incoming().recipientId
+              )
+            )
+          );
+
+        allow update, delete: if false;
+      }
+    }
+  }
+}
