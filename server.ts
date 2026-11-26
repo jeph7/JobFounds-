@@ -1444,10 +1444,11 @@ export class ErrorOverlay extends HTMLElement {}
 
     app.use(vite.middlewares);
   } else {
-    if (fs.existsSync(distPath)) {
+    const indexHtmlPath = path.join(distPath, 'index.html');
+    if (fs.existsSync(indexHtmlPath)) {
       app.use(express.static(distPath));
       app.get('*', (_req, res) => {
-        res.sendFile(path.join(distPath, 'index.html'));
+        res.sendFile(indexHtmlPath);
       });
     }
   }

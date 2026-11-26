@@ -1,16 +1,18 @@
-node_modules/
-build/
-dist/
-dist-server/
-coverage/
+/node_modules/
+/build/
+/dist/
+/dist-server/
+/coverage/
 .DS_Store
 *.log
 .env*
 !.env.example
 !server.js
 !scripts/cron-worker.js
-.aistudio/
-data/
-logs/
-tmp/
+!src/data/
+!src/data/initialData.ts
+/.aistudio/
+/data/
+/logs/
+/tmp/
 
