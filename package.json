@@ -10,12 +10,12 @@
   "scripts": {
     "dev": "tsx server.ts",
     "build:client": "vite build",
-    "build:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --target=node22 --outfile=server.js && esbuild scripts/cron-worker.ts --bundle --platform=node --format=esm --packages=external --target=node22 --outfile=scripts/cron-worker.js",
+    "build:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --target=node22 --outfile=dist-server/server.mjs && esbuild scripts/cron-worker.ts --bundle --platform=node --format=esm --packages=external --target=node22 --outfile=dist-server/cron-worker.mjs",
     "build": "npm run build:client && npm run build:server",
     "start": "node server.js",
     "cron:tick": "node scripts/cron-worker.js",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js scripts/cron-worker.js",
+    "clean": "rm -rf dist dist-server",
     "lint": "tsc --noEmit"
   },
   "dependencies": {

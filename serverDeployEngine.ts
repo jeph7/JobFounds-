@@ -19,7 +19,11 @@ const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PROJECT_ROOT = __dirname;
+const PROJECT_ROOT =
+  process.env.JOBFOUNDS_PROJECT_ROOT ||
+  (fs.existsSync(path.join(__dirname, 'package.json'))
+    ? __dirname
+    : path.resolve(__dirname, '..'));
 const getDataDir = () => resolveEngineDataDir();
 const getBackupsDir = () => path.join(getDataDir(), 'backups');
 const getStagingDir = () => path.join(getDataDir(), 'deploy-staging');
@@ -1223,6 +1227,7 @@ function persistRunSnapshot(run: DeployRunRecord, bundlePath: string): void {
 function collectProductionBundleEntries(): string[] {
   const candidates = [
     'dist',
+    'dist-server',
     'public',
     'server.js',
     'scripts/cron-worker.js',

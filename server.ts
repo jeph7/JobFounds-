@@ -1367,8 +1367,16 @@ Return ONLY a valid JSON object in ${outputLang}:
   attachLiveVoiceBridge(httpServer, getAiClient);
 
   // Vite dev middleware or static production build
-  const distPath = path.resolve(__dirname, 'dist');
-  const isCompiledServerJs = __filename.endsWith('.js');
+  const projectRoot =
+    process.env.JOBFOUNDS_PROJECT_ROOT ||
+    (fs.existsSync(path.join(__dirname, 'package.json'))
+      ? __dirname
+      : path.resolve(__dirname, '..'));
+  const distPath = path.resolve(projectRoot, 'dist');
+  const isCompiledServerJs =
+    __filename.endsWith('.js') ||
+    __filename.endsWith('.mjs') ||
+    process.env.JOBFOUNDS_COMPILED_ENTRY === '1';
   const isProd =
     process.env.NODE_ENV === 'production' ||
     ((isCompiledServerJs || process.env.npm_lifecycle_event === 'start') &&
