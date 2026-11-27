@@ -6,11 +6,15 @@ import {
   type CareerJobRecord,
   type CompanyRecord,
   type CompanySignalRecord,
+  confirmPortalSubmission,
+  createEngineDbBackup,
+  createNotification,
   enqueueBackgroundJob,
   getCandidateSubscription,
   getCompanyById,
   getEngineDb,
   getEngineOverviewMetrics,
+  getSubmissionAttachmentForActor,
   type HrContactRecord,
   listAllActiveCareerJobs,
   listAuditLogs,
@@ -19,12 +23,16 @@ import {
   listCompanyCareerChanges,
   listCompanyCareerJobs,
   listCrmEmailSyncEvents,
+  listEmployerReceivedApplications,
+  listEngineDbBackups,
   listHrContacts,
   listSignals,
+  listUserApplicationSubmissions,
   listUserNotifications,
   markNotificationRead,
   mergeCompanies,
   type NotificationRecord,
+  respondToEmployerApplication,
   retryFailedJob,
   reviewHrContactAdmin,
   reviewSignalAdmin,
@@ -35,6 +43,11 @@ import {
   upsertCompany,
   writeAuditLog,
 } from './serverEngineDb.ts';
+import {
+  checkLiveJobAvailability,
+  submitRealApplication,
+  verifyResendDomainStatus,
+} from './serverApplicationEngine.ts';
 import { monitorCompanyCareerPage } from './serverCareerMonitor.ts';
 import {
   computeCandidateIntelligenceMatches,
@@ -139,7 +152,7 @@ export function serializeHrContact(hc: HrContactRecord) {
     location: hc.department || '',
     contactChannel: hc.publicChannel || hc.sourceName || '',
     publicUrl: hc.publicProfileUrl || hc.sourceUrl || '',
-    corporateEmail: '',
+    corporateEmail: hc.publicEmail || '',
     domainMxVerified: Boolean(hc.mxVerified || hc.emailDomainVerified),
     createdAt: hc.verifiedAt || '',
   };
@@ -160,9 +173,14 @@ export function serializeMatchItem(m: IntelligenceMatchItem) {
     breakdown: {
       skills: m.breakdown.skillsScore,
       experience: m.breakdown.experienceRoleScore,
+      education: m.breakdown.educationScore,
+      languages: m.breakdown.languagesScore,
       locationAndMobility: m.breakdown.locationMobilityScore,
-      languages: Math.round((m.breakdown.locationMobilityScore + m.breakdown.signalReliabilityScore) / 2),
+      workAuthorization: m.breakdown.workAuthorizationScore,
+      availability: m.breakdown.availabilityScore,
+      salary: m.breakdown.salaryScore,
       sectorAndRole: m.breakdown.experienceRoleScore,
+      signalReliability: m.breakdown.signalReliabilityScore,
     },
     matchedSkills: m.matchedSkills,
     missingSkills: m.missingSkills,
@@ -178,8 +196,13 @@ export function serializeMatchItem(m: IntelligenceMatchItem) {
       ? {
           fullName: m.recommendedContact.fullName,
           roleTitle: m.recommendedContact.roleTitle,
-          channel: m.recommendedContact.publicProfileUrl ? 'Official Portal / Public Profile' : 'Public Directory',
+          channel: m.recommendedContact.publicEmail
+            ? `Email officiel vérifié (${m.recommendedContact.publicEmail})`
+            : m.recommendedContact.publicProfileUrl
+              ? 'Official Portal / Public Profile'
+              : 'Public Directory',
           publicUrl: m.recommendedContact.publicProfileUrl || '',
+          corporateEmail: m.recommendedContact.publicEmail || '',
           confidenceLevel: m.recommendedContact.confidenceLevel,
         }
       : null,
@@ -1104,6 +1127,376 @@ export function createIntelligenceRouter() {
   router.get('/crm/email-sync-history', requireFirebaseAuth, standardLimiter, (req: AuthedRequest, res) => {
     const events = listCrmEmailSyncEvents(req.authUser!.uid, Number(req.query.limit) || 40);
     res.json({ events });
+  });
+
+  // ===========================================================================
+  // REAL LIVE JOB AVAILABILITY CHECK & APPLICATION SUBMISSION ENGINE
+  // ===========================================================================
+  const applicationSubmitLimiter = createRateLimiter({
+    windowMs: 60 * 60_000,
+    maxAuthenticated: 15,
+    maxGuest: 0,
+    bucketPrefix: 'app_submit',
+  });
+
+  const CheckAvailabilitySchema = z.object({
+    url: z.string().trim().min(8).max(600),
+  });
+
+  const ApplicationAttachmentSchema = z.object({
+    filename: z.string().trim().min(1).max(160),
+    contentType: z.string().trim().min(3).max(120),
+    base64Content: z.string().min(4).max(6_000_000),
+  });
+
+  const ApplicationSubmitSchema = z.object({
+    applicationId: z.string().max(128).optional(),
+    companyId: z.string().max(128).optional(),
+    recruiterId: z.string().max(128).optional(),
+    companyName: z.string().trim().min(1).max(160),
+    roleTitle: z.string().trim().min(1).max(180),
+    opportunityType: z.enum(['published_job', 'hidden_opportunity']).default('published_job'),
+    classification: z
+      .enum(['confirmed_job', 'confirmed_hiring_need', 'probable_hiring_signal', 'potential_opportunity', ''])
+      .optional()
+      .default(''),
+    channel: z.enum(['resend_email', 'official_portal', 'jobfounds_direct']),
+    recipientEmail: z.string().trim().max(200).optional(),
+    recipientName: z.string().trim().max(140).optional(),
+    officialUrl: z.string().trim().max(600).optional(),
+    subject: z.string().trim().min(2).max(240),
+    coverLetter: z.string().trim().min(20).max(10_000),
+    cvVersionName: z.string().trim().max(160).optional(),
+    candidateName: z.string().trim().min(1).max(140).optional(),
+    attachments: z.array(ApplicationAttachmentSchema).max(3).optional(),
+    explicitAuthorization: z.literal(true),
+  });
+
+  const ConfirmPortalSchema = z.object({
+    portalReference: z.string().trim().max(140).optional().default(''),
+  });
+
+  const EmployerRespondSchema = z.object({
+    status: z.enum([
+      'received',
+      'under_review',
+      'interview_scheduled',
+      'offer_received',
+      'rejected',
+      'message_received',
+    ]),
+    replyMessage: z.string().trim().min(2).max(4000),
+  });
+
+  router.post(
+    '/jobs/check-availability',
+    requireFirebaseAuth,
+    scanLimiter,
+    async (req: AuthedRequest, res) => {
+      const parsed = CheckAvailabilitySchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: 'URL d’offre invalide.' });
+        return;
+      }
+      const result = await checkLiveJobAvailability(parsed.data.url);
+      res.json({ result });
+    }
+  );
+
+  router.post(
+    '/applications/submit',
+    requireFirebaseAuth,
+    applicationSubmitLimiter,
+    async (req: AuthedRequest, res) => {
+      const parsed = ApplicationSubmitSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          error:
+            'Données de candidature incomplètes ou autorisation explicite manquante.',
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      try {
+        const result = await submitRealApplication({
+          userId: req.authUser!.uid,
+          recruiterId: parsed.data.recruiterId,
+          candidateName:
+            parsed.data.candidateName ||
+            req.authUser!.email ||
+            'Candidat',
+          candidateEmail: req.authUser!.email || '',
+          applicationId: parsed.data.applicationId,
+          companyId: parsed.data.companyId,
+          companyName: parsed.data.companyName,
+          roleTitle: parsed.data.roleTitle,
+          opportunityType: parsed.data.opportunityType,
+          classification: parsed.data.classification,
+          channel: parsed.data.channel,
+          recipientEmail: parsed.data.recipientEmail,
+          recipientName: parsed.data.recipientName,
+          officialUrl: parsed.data.officialUrl,
+          subject: parsed.data.subject,
+          coverLetter: parsed.data.coverLetter,
+          cvVersionName: parsed.data.cvVersionName,
+          attachments: parsed.data.attachments,
+          explicitAuthorization: parsed.data.explicitAuthorization,
+        });
+
+        writeAuditLog({
+          actorUid: req.authUser!.uid,
+          actorEmail: req.authUser!.email,
+          actorRole: isAdminAuthUser(req.authUser) ? 'admin' : 'user',
+          action: result.transmitted
+            ? `application_transmitted:${parsed.data.channel}`
+            : `application_prepared:${parsed.data.channel}`,
+          targetType: 'application_submission',
+          targetId: result.submission.id,
+          details: {
+            companyName: parsed.data.companyName,
+            roleTitle: parsed.data.roleTitle,
+            channel: parsed.data.channel,
+            deliveryStatus: result.deliveryStatus,
+            transmitted: result.transmitted,
+            attachmentsCount: result.submission.attachments.length,
+          },
+          ipAddress: extractClientIp(req),
+        });
+
+        res.json(result);
+      } catch (err) {
+        res.status(400).json({
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Impossible de traiter cette candidature.',
+        });
+      }
+    }
+  );
+
+  router.get(
+    '/applications/submissions',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const submissions = listUserApplicationSubmissions(
+        req.authUser!.uid,
+        Number(req.query.limit) || 60
+      );
+      const emailConfig = getResendConfigStatus();
+      res.json({
+        submissions,
+        emailRelayReady: emailConfig.ready,
+      });
+    }
+  );
+
+  router.post(
+    '/applications/submissions/:id/confirm-portal',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const parsed = ConfirmPortalSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({ error: 'Référence portail invalide.' });
+        return;
+      }
+      const updated = confirmPortalSubmission({
+        submissionId: String(req.params.id || ''),
+        userId: req.authUser!.uid,
+        portalReference: parsed.data.portalReference,
+      });
+      if (!updated) {
+        res.status(404).json({ error: 'Dossier de candidature introuvable.' });
+        return;
+      }
+      writeAuditLog({
+        actorUid: req.authUser!.uid,
+        actorEmail: req.authUser!.email,
+        actorRole: isAdminAuthUser(req.authUser) ? 'admin' : 'user',
+        action: 'application_portal_confirmed',
+        targetType: 'application_submission',
+        targetId: updated.id,
+        details: {
+          companyName: updated.companyName,
+          roleTitle: updated.roleTitle,
+          portalReference: updated.portalReference,
+        },
+        ipAddress: extractClientIp(req),
+      });
+      res.json({ submission: updated });
+    }
+  );
+
+  // ===========================================================================
+  // EMPLOYER DIRECT APPLICATION INBOX, ATTACHMENTS & REPLIES (STRICT OWNERSHIP)
+  // ===========================================================================
+  router.get(
+    '/employer/applications',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const applications = listEmployerReceivedApplications(
+        req.authUser!.uid,
+        Number(req.query.limit) || 60
+      );
+      res.json({ applications });
+    }
+  );
+
+  router.get(
+    '/employer/applications/:id/attachments/:index',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const idx = Number(req.params.index);
+      if (!Number.isInteger(idx) || idx < 0 || idx > 5) {
+        res.status(400).json({ error: 'Index de pièce jointe invalide.' });
+        return;
+      }
+      const att = getSubmissionAttachmentForActor({
+        submissionId: String(req.params.id || ''),
+        actorUid: req.authUser!.uid,
+        attachmentIndex: idx,
+      });
+      if (!att) {
+        res.status(404).json({ error: 'Pièce jointe introuvable ou accès non autorisé.' });
+        return;
+      }
+      res.setHeader('Content-Type', att.contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${att.filename}"`);
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      res.send(att.buffer);
+    }
+  );
+
+  router.post(
+    '/employer/applications/:id/respond',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const parsed = EmployerRespondSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          error: 'Réponse employeur ou statut invalide.',
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const updated = respondToEmployerApplication({
+        submissionId: String(req.params.id || ''),
+        recruiterId: req.authUser!.uid,
+        status: parsed.data.status,
+        replyMessage: parsed.data.replyMessage,
+      });
+      if (!updated) {
+        res.status(404).json({ error: 'Candidature directe introuvable ou non autorisée.' });
+        return;
+      }
+      createNotification({
+        uid: updated.userId,
+        type: 'application_update',
+        title: `Réponse employeur · ${updated.companyName} (${updated.roleTitle})`,
+        body: parsed.data.replyMessage.slice(0, 600),
+        companyId: updated.companyId,
+        companyName: updated.companyName,
+        classification: 'confirmed_job',
+        channelStatus: { inApp: true, emailSent: false, pushReady: false },
+        dedupKey: `emp_reply_${updated.id}_${Date.now()}`,
+      });
+      writeAuditLog({
+        actorUid: req.authUser!.uid,
+        actorEmail: req.authUser!.email,
+        actorRole: isAdminAuthUser(req.authUser) ? 'admin' : 'recruiter',
+        action: `employer_replied:${parsed.data.status}`,
+        targetType: 'application_submission',
+        targetId: updated.id,
+        details: {
+          companyName: updated.companyName,
+          roleTitle: updated.roleTitle,
+          status: parsed.data.status,
+        },
+        ipAddress: extractClientIp(req),
+      });
+      res.json({ submission: updated });
+    }
+  );
+
+  // ===========================================================================
+  // RESEND EMAIL DOMAIN DIAGNOSTICS & ADMIN SQLITE BACKUPS
+  // ===========================================================================
+  router.get(
+    '/email/status',
+    requireFirebaseAuth,
+    standardLimiter,
+    async (_req: AuthedRequest, res) => {
+      const diagnostics = await verifyResendDomainStatus();
+      res.json({ diagnostics });
+    }
+  );
+
+  router.post(
+    '/email/test-delivery',
+    requireAdminAuth,
+    scanLimiter,
+    async (req: AuthedRequest, res) => {
+      const recipient =
+        typeof req.body?.to === 'string' && req.body.to.includes('@')
+          ? req.body.to.trim()
+          : req.authUser?.email || '';
+      if (!recipient) {
+        res.status(400).json({ error: 'Adresse destinataire requise pour le test e-mail.' });
+        return;
+      }
+      const testCv = Buffer.from(
+        `CV TEST JOBFOUNDS\nCandidat : ${req.authUser?.email || 'Admin'}\nDate UTC : ${new Date().toISOString()}`,
+        'utf8'
+      ).toString('base64');
+      const result = await submitRealApplication({
+        userId: req.authUser!.uid,
+        candidateName: 'Test Livraison JOBFOUNDS',
+        candidateEmail: req.authUser!.email || recipient,
+        companyName: 'JOBFOUNDS Verification',
+        roleTitle: 'Test livraison candidature avec pièce jointe',
+        opportunityType: 'published_job',
+        channel: 'resend_email',
+        recipientEmail: recipient,
+        recipientName: 'Destinataire Test',
+        subject: '[JOBFOUNDS] Test réel d’envoi de candidature + CV joint',
+        coverLetter:
+          'Ceci est un test réel de transmission de candidature via Resend avec CV en pièce jointe afin de vérifier la remise effective et la conservation de la preuve fournisseur.',
+        cvVersionName: 'CV-Test-Verification.txt',
+        attachments: [
+          {
+            filename: 'CV-Test-JOBFOUNDS.txt',
+            contentType: 'text/plain',
+            base64Content: testCv,
+          },
+        ],
+        explicitAuthorization: true,
+      });
+      res.json(result);
+    }
+  );
+
+  router.get('/admin/backups', requireAdminAuth, standardLimiter, (_req, res) => {
+    res.json({ backups: listEngineDbBackups() });
+  });
+
+  router.post('/admin/backups/create', requireAdminAuth, scanLimiter, (req: AuthedRequest, res) => {
+    const backup = createEngineDbBackup('manual');
+    writeAuditLog({
+      actorUid: req.authUser!.uid,
+      actorEmail: req.authUser!.email,
+      actorRole: 'admin',
+      action: 'sqlite_backup_created',
+      targetType: 'database',
+      targetId: backup.filename,
+      details: backup,
+      ipAddress: extractClientIp(req),
+    });
+    res.json({ backup, backups: listEngineDbBackups() });
   });
 
   // ===========================================================================

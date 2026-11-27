@@ -74,6 +74,8 @@ export interface JobListing {
   languages: string[];
   skills: string[];
   publishedDate: string;
+  applicationDeadline?: string;
+  companyId?: string;
   sourceName: string;
   sourceUrl: string;
   verificationStatus: VerificationStatus;
@@ -83,6 +85,92 @@ export interface JobListing {
   visaSponsorship?: string;
   recruiterId?: string;
   isEmployerDirect?: boolean;
+}
+
+export interface JobAvailabilityCheck {
+  url: string;
+  finalUrl: string;
+  available: boolean;
+  status: 'available' | 'expired' | 'unreachable' | 'unverifiable';
+  httpStatus: number | null;
+  applicationDeadline: string;
+  warnings: string[];
+  checkedAt: string;
+}
+
+export type ApplicationSubmissionChannel =
+  | 'resend_email'
+  | 'official_portal'
+  | 'jobfounds_direct';
+
+export type ApplicationDeliveryStatus =
+  | 'transmitted_email'
+  | 'transmitted_jobfounds_portal'
+  | 'awaiting_portal_confirmation'
+  | 'portal_confirmed_by_user'
+  | 'failed';
+
+export interface ApplicationAttachmentInput {
+  filename: string;
+  contentType: string;
+  base64Content: string;
+  sizeBytes?: number;
+}
+
+export type EmployerApplicationStatus =
+  | 'received'
+  | 'under_review'
+  | 'interview_scheduled'
+  | 'offer_received'
+  | 'rejected'
+  | 'message_received';
+
+export interface ApplicationSubmissionRecord {
+  id: string;
+  userId: string;
+  recruiterId?: string;
+  candidateName?: string;
+  candidateEmail?: string;
+  applicationId: string;
+  companyId: string;
+  companyName: string;
+  roleTitle: string;
+  opportunityType: 'published_job' | 'hidden_opportunity';
+  classification: NeedClassification | '';
+  channel: ApplicationSubmissionChannel;
+  recipientEmail: string;
+  recipientName: string;
+  officialUrl: string;
+  subject: string;
+  coverLetterPreview: string;
+  coverLetterFull?: string;
+  cvVersionName: string;
+  attachments: Array<{ filename: string; contentType: string; sizeBytes: number }>;
+  explicitAuthorization: boolean;
+  authorizationTimestamp: string;
+  transmitted: boolean;
+  deliveryStatus: ApplicationDeliveryStatus;
+  providerMessageId: string;
+  portalConfirmedAt: string | null;
+  portalReference: string;
+  employerStatus?: EmployerApplicationStatus;
+  employerReply?: string;
+  employerRepliedAt?: string | null;
+  errorMessage: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ResendDomainDiagnostics {
+  apiKeyConfigured: boolean;
+  fromEmailConfigured: boolean;
+  fromEmail: string;
+  senderDomain: string;
+  ready: boolean;
+  dnsSpfDetected: boolean;
+  dnsDmarcDetected: boolean;
+  resendDomainStatus: 'verified' | 'pending' | 'not_found' | 'unconfigured' | 'check_failed';
+  notes: string[];
 }
 
 export interface HiddenOpportunity {
@@ -270,6 +358,11 @@ export interface TrackedApplication {
   approvalStatus?: 'not_required' | 'pending_user_approval' | 'approved_by_user';
   followUpCount?: number;
   lastFollowUpAt?: string;
+  submissionId?: string;
+  deliveryStatus?: ApplicationDeliveryStatus;
+  deliveryChannel?: ApplicationSubmissionChannel;
+  providerMessageId?: string;
+  attachmentNames?: string[];
   notes: string;
 }
 
@@ -361,12 +454,17 @@ export interface RecruiterFinderResult {
   officialDomain: string;
   careersPortalUrl: string;
   emailDomainStatus: 'Verified' | 'Partially Verified' | 'Unverified';
+  domainMxVerified?: boolean;
+  mxHosts?: string[];
   contacts: Array<{
     nameOrTitle: string;
     role: string;
     location: string;
     channel: string;
+    corporateEmail?: string;
     publicUrl: string;
+    confidenceLevel?: ContactConfidenceLevel;
+    domainMxVerified?: boolean;
     verificationNote: string;
     outreachTip: string;
   }>;
@@ -431,7 +529,14 @@ export interface SalaryVisaReport {
 // =============================================================================
 // GLOBAL RECRUITMENT INTELLIGENCE & AUTOMATION ENGINE TYPES
 // =============================================================================
-export type AtsProvider = 'greenhouse' | 'lever' | 'ashby' | 'jsonld_html' | 'none';
+export type AtsProvider =
+  | 'greenhouse'
+  | 'lever'
+  | 'ashby'
+  | 'workday'
+  | 'smartrecruiters'
+  | 'jsonld_html'
+  | 'none';
 
 export type NeedClassification =
   | 'confirmed_job'
@@ -514,6 +619,7 @@ export interface CareerJobRecord {
   skills: string[];
   salaryRange: string;
   applyUrl: string;
+  applicationDeadline?: string;
   status: 'active' | 'expired';
   firstSeenAt: string;
   lastSeenAt: string;
@@ -564,9 +670,14 @@ export interface IntelligenceMatchItem {
   breakdown: {
     skills: number;
     experience: number;
-    locationAndMobility: number;
+    education?: number;
     languages: number;
+    locationAndMobility: number;
+    workAuthorization?: number;
+    availability?: number;
+    salary?: number;
     sectorAndRole: number;
+    signalReliability?: number;
   };
   matchedSkills: string[];
   missingSkills: string[];
@@ -577,6 +688,7 @@ export interface IntelligenceMatchItem {
     roleTitle: string;
     channel: string;
     publicUrl: string;
+    corporateEmail?: string;
     confidenceLevel: ContactConfidenceLevel;
   } | null;
   applyUrl: string;

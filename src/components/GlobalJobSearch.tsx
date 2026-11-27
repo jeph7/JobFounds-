@@ -11,6 +11,7 @@ import {
   MapPin,
   Rss,
   Search,
+  Send,
   ShieldCheck,
   SlidersHorizontal,
 } from 'lucide-react';
@@ -27,6 +28,7 @@ import { fetchLiveJobFeeds, searchGlobalJobs } from '../utils/api';
 import { safeExternalUrl } from '../utils/safeUrl';
 import { VerificationStatusText } from './StatusText';
 import { CareerLocationMapHub } from './CareerLocationMapHub';
+import type { ApplicationModalTarget } from './ApplicationSubmissionModal';
 
 interface GlobalJobSearchProps {
   lang: Lang;
@@ -40,17 +42,224 @@ interface GlobalJobSearchProps {
   onAnalyzeAtsForJob: (job: JobListing) => void;
   onOpenMatchForJob: (job: JobListing) => void;
   onOpenCompanyIntel: (companyName: string, country?: string) => void;
+  onOpenApplyModal?: (target: ApplicationModalTarget) => void;
   initialQuery?: string;
   initialCountry?: string;
   externalSearchTrigger: number;
 }
 
+const GLOBAL_REGIONS: Array<{ id: string; queryValue: string; labelFr: string; labelEn: string }> = [
+  { id: 'world', queryValue: '', labelFr: 'Monde', labelEn: 'Worldwide' },
+  { id: 'europe', queryValue: 'Europe', labelFr: 'Europe', labelEn: 'Europe' },
+  { id: 'north_america', queryValue: 'Amérique du Nord', labelFr: 'Amérique du Nord', labelEn: 'North America' },
+  { id: 'latam', queryValue: 'Amérique latine', labelFr: 'Amérique latine', labelEn: 'Latin America' },
+  { id: 'caribbean', queryValue: 'Caraïbes', labelFr: 'Caraïbes', labelEn: 'Caribbean' },
+  { id: 'africa', queryValue: 'Afrique', labelFr: 'Afrique', labelEn: 'Africa' },
+  { id: 'asia', queryValue: 'Asie', labelFr: 'Asie', labelEn: 'Asia' },
+  { id: 'oceania', queryValue: 'Océanie', labelFr: 'Océanie', labelEn: 'Oceania' },
+];
+
+type ClientRegionId =
+  | 'europe'
+  | 'north_america'
+  | 'latin_america'
+  | 'caribbean'
+  | 'africa'
+  | 'asia'
+  | 'oceania';
+
+const CLIENT_REGION_DEFS: Record<ClientRegionId, { triggers: string[]; broadLabels: string[]; countries: string[] }> = {
+  europe: {
+    triggers: ['europe', 'eu', 'european union', 'union europeenne', 'emea'],
+    broadLabels: ['europe', 'eu', 'european union', 'eea', 'emea'],
+    countries: [
+      'france', 'paris', 'lyon', 'marseille', 'germany', 'allemagne', 'deutschland', 'berlin', 'munich',
+      'switzerland', 'suisse', 'zurich', 'geneva', 'geneve', 'uk', 'united kingdom', 'royaume-uni', 'london', 'londres',
+      'spain', 'espagne', 'madrid', 'barcelona', 'italy', 'italie', 'milan', 'rome', 'netherlands', 'pays-bas', 'amsterdam',
+      'belgium', 'belgique', 'brussels', 'bruxelles', 'portugal', 'lisbon', 'ireland', 'irlande', 'dublin',
+      'sweden', 'suede', 'stockholm', 'poland', 'pologne', 'warsaw', 'austria', 'autriche', 'vienna', 'luxembourg',
+      'denmark', 'norway', 'finland', 'czech', 'romania', 'greece',
+    ],
+  },
+  north_america: {
+    triggers: ['north america', 'amerique du nord', 'americas', 'ameriques'],
+    broadLabels: ['north america', 'amerique du nord', 'americas', 'ameriques', 'noram'],
+    countries: [
+      'united states', 'etats-unis', 'usa', 'us', 'new york', 'san francisco', 'seattle', 'austin', 'boston', 'chicago', 'miami', 'california',
+      'canada', 'toronto', 'montreal', 'vancouver', 'ottawa', 'quebec', 'calgary',
+    ],
+  },
+  latin_america: {
+    triggers: ['latin america', 'amerique latine', 'latam', 'south america', 'amerique du sud', 'central america'],
+    broadLabels: ['latin america', 'amerique latine', 'latam', 'south america', 'amerique du sud', 'central america', 'americas'],
+    countries: [
+      'mexico', 'mexique', 'mexico city', 'brazil', 'bresil', 'brasil', 'sao paulo', 'rio de janeiro',
+      'colombia', 'colombie', 'bogota', 'medellin', 'argentina', 'argentine', 'buenos aires',
+      'chile', 'chili', 'santiago', 'peru', 'perou', 'lima', 'uruguay', 'costa rica', 'panama', 'ecuador', 'equateur',
+    ],
+  },
+  caribbean: {
+    triggers: ['caribbean', 'caraibes', 'antilles', 'west indies'],
+    broadLabels: ['caribbean', 'caraibes', 'antilles', 'west indies', 'americas', 'latam'],
+    countries: [
+      'haiti', 'ayiti', 'port-au-prince', 'cap-haitien', 'dominican republic', 'republique dominicaine', 'santo domingo',
+      'jamaica', 'jamaique', 'kingston', 'trinidad', 'barbados', 'barbade', 'bahamas', 'puerto rico', 'porto rico',
+      'cuba', 'guadeloupe', 'martinique', 'saint lucia', 'curacao', 'aruba',
+    ],
+  },
+  africa: {
+    triggers: ['africa', 'afrique'],
+    broadLabels: ['africa', 'afrique', 'emea'],
+    countries: [
+      'senegal', 'dakar', 'ivory coast', 'cote d ivoire', 'abidjan', 'morocco', 'maroc', 'casablanca', 'rabat',
+      'tunisia', 'tunisie', 'tunis', 'algeria', 'algerie', 'nigeria', 'lagos', 'kenya', 'nairobi',
+      'south africa', 'afrique du sud', 'cape town', 'johannesburg', 'egypt', 'egypte', 'cairo',
+      'ghana', 'accra', 'cameroon', 'cameroun', 'rwanda', 'kigali', 'ethiopia', 'benin', 'togo', 'mauritius', 'madagascar',
+    ],
+  },
+  asia: {
+    triggers: ['asia', 'asie', 'apac', 'asia-pacific', 'middle east', 'moyen-orient'],
+    broadLabels: ['asia', 'asie', 'apac', 'asia-pacific', 'middle east', 'mena'],
+    countries: [
+      'japan', 'japon', 'tokyo', 'osaka', 'singapore', 'singapour', 'india', 'inde', 'bengaluru', 'bangalore', 'mumbai',
+      'south korea', 'coree du sud', 'seoul', 'vietnam', 'philippines', 'manila', 'indonesia', 'indonesie', 'jakarta',
+      'malaysia', 'malaisie', 'thailand', 'thailande', 'uae', 'united arab emirates', 'dubai', 'saudi arabia', 'qatar',
+      'taiwan', 'hong kong', 'china', 'israel',
+    ],
+  },
+  oceania: {
+    triggers: ['oceania', 'oceanie', 'anz'],
+    broadLabels: ['oceania', 'oceanie', 'apac', 'asia-pacific', 'anz'],
+    countries: [
+      'australia', 'australie', 'sydney', 'melbourne', 'brisbane', 'perth',
+      'new zealand', 'nouvelle-zelande', 'auckland', 'wellington', 'fiji',
+    ],
+  },
+};
+
+const CLIENT_COUNTRY_ALIASES: Array<{ region: ClientRegionId; aliases: string[] }> = [
+  { region: 'europe', aliases: ['france', 'paris', 'lyon', 'marseille', 'bordeaux', 'toulouse'] },
+  { region: 'europe', aliases: ['germany', 'allemagne', 'deutschland', 'berlin', 'munich', 'frankfurt', 'hamburg'] },
+  { region: 'europe', aliases: ['switzerland', 'suisse', 'zurich', 'geneva', 'geneve', 'basel', 'lausanne'] },
+  { region: 'europe', aliases: ['united kingdom', 'royaume-uni', 'uk', 'london', 'londres', 'manchester', 'england', 'scotland'] },
+  { region: 'europe', aliases: ['netherlands', 'pays-bas', 'holland', 'amsterdam', 'rotterdam'] },
+  { region: 'europe', aliases: ['spain', 'espagne', 'madrid', 'barcelona'] },
+  { region: 'europe', aliases: ['italy', 'italie', 'milan', 'rome'] },
+  { region: 'europe', aliases: ['belgium', 'belgique', 'brussels', 'bruxelles'] },
+  { region: 'europe', aliases: ['ireland', 'irlande', 'dublin'] },
+  { region: 'europe', aliases: ['portugal', 'lisbon', 'lisbonne', 'porto'] },
+  { region: 'north_america', aliases: ['united states', 'etats-unis', 'usa', 'us', 'new york', 'san francisco', 'austin', 'seattle', 'california'] },
+  { region: 'north_america', aliases: ['canada', 'toronto', 'montreal', 'vancouver', 'ottawa', 'quebec'] },
+  { region: 'caribbean', aliases: ['haiti', 'ayiti', 'port-au-prince', 'cap-haitien'] },
+  { region: 'caribbean', aliases: ['dominican republic', 'republique dominicaine', 'santo domingo'] },
+  { region: 'caribbean', aliases: ['jamaica', 'jamaique', 'kingston'] },
+  { region: 'latin_america', aliases: ['brazil', 'bresil', 'brasil', 'sao paulo', 'rio de janeiro'] },
+  { region: 'latin_america', aliases: ['mexico', 'mexique', 'mexico city'] },
+  { region: 'latin_america', aliases: ['colombia', 'colombie', 'bogota', 'medellin'] },
+  { region: 'latin_america', aliases: ['argentina', 'argentine', 'buenos aires'] },
+  { region: 'latin_america', aliases: ['chile', 'chili', 'santiago'] },
+  { region: 'latin_america', aliases: ['peru', 'perou', 'lima'] },
+  { region: 'africa', aliases: ['senegal', 'dakar'] },
+  { region: 'africa', aliases: ['morocco', 'maroc', 'casablanca', 'rabat'] },
+  { region: 'africa', aliases: ['ivory coast', 'cote d ivoire', 'cote divoire', 'abidjan'] },
+  { region: 'africa', aliases: ['south africa', 'afrique du sud', 'cape town', 'johannesburg'] },
+  { region: 'africa', aliases: ['nigeria', 'lagos', 'abuja'] },
+  { region: 'africa', aliases: ['kenya', 'nairobi'] },
+  { region: 'asia', aliases: ['japan', 'japon', 'tokyo', 'osaka'] },
+  { region: 'asia', aliases: ['singapore', 'singapour'] },
+  { region: 'asia', aliases: ['india', 'inde', 'bengaluru', 'bangalore', 'mumbai'] },
+  { region: 'asia', aliases: ['south korea', 'coree du sud', 'seoul'] },
+  { region: 'oceania', aliases: ['australia', 'australie', 'sydney', 'melbourne', 'brisbane'] },
+  { region: 'oceania', aliases: ['new zealand', 'nouvelle-zelande', 'auckland', 'wellington'] },
+];
+
+function normGeo(v: string): string {
+  return (v || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim();
+}
+
+function hasGeoBoundaryTerm(haystack: string, rawTerm: string): boolean {
+  const term = normGeo(rawTerm);
+  if (!term) return false;
+  const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(?:^|[^a-z0-9])${escaped}(?:$|[^a-z0-9])`, 'i').test(haystack);
+}
+
+function isClientWorldwideRemote(job: JobListing): boolean {
+  if (job.workMode !== 'Remote') return false;
+  const norm = normGeo(job.country).replace(/[,/|()_-]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (
+    !norm ||
+    ['anywhere', 'worldwide', 'global', 'international', 'everywhere', 'remote', 'remote worldwide', 'global remote', 'anywhere in the world', 'work from anywhere'].includes(norm)
+  ) {
+    return true;
+  }
+  return (
+    /\b(worldwide|anywhere|everywhere|work from anywhere)\b/.test(norm) &&
+    !/\b(only|except|excluding|us|usa|uk|eu|europe|emea|latam|apac|canada|germany|france)\b/.test(norm)
+  );
+}
+
+function hasClientBroadRegionLabel(locHay: string, regionId: ClientRegionId, rawLabel: string): boolean {
+  const lbl = normGeo(rawLabel);
+  if (!hasGeoBoundaryTerm(locHay, lbl)) return false;
+  if (lbl === 'africa') {
+    const withoutSouthAfrica = locHay.replace(/\bsouth\s+africa\b/g, ' ');
+    if (!hasGeoBoundaryTerm(withoutSouthAfrica, 'africa')) return false;
+  }
+  if (
+    lbl === 'emea' &&
+    regionId === 'africa' &&
+    /\b(european timezones|eu only|germany|uk|united kingdom|ireland|france|spain|poland|netherlands|switzerland|italy)\b/.test(
+      locHay
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
+function matchesClientGeography(job: JobListing, countryInput: string): boolean {
+  const raw = normGeo(countryInput);
+  if (!raw || raw === 'monde' || raw === 'worldwide' || raw === 'global') return true;
+  const locHay = normGeo(`${job.country} ${job.city}`);
+
+  for (const [regionId, def] of Object.entries(CLIENT_REGION_DEFS) as Array<
+    [ClientRegionId, { triggers: string[]; broadLabels: string[]; countries: string[] }]
+  >) {
+    if (def.triggers.includes(raw)) {
+      if (def.countries.some((c) => hasGeoBoundaryTerm(locHay, c))) return true;
+      if (def.broadLabels.some((lbl) => hasClientBroadRegionLabel(locHay, regionId, lbl))) return true;
+      return isClientWorldwideRemote(job);
+    }
+  }
+
+  const matchedCountry = CLIENT_COUNTRY_ALIASES.find((entry) => entry.aliases.includes(raw));
+  if (matchedCountry) {
+    if (matchedCountry.aliases.some((alias) => hasGeoBoundaryTerm(locHay, alias))) return true;
+    const regionDef = CLIENT_REGION_DEFS[matchedCountry.region];
+    if (regionDef.broadLabels.some((lbl) => hasClientBroadRegionLabel(locHay, matchedCountry.region, lbl))) {
+      return true;
+    }
+    return isClientWorldwideRemote(job);
+  }
+
+  if (hasGeoBoundaryTerm(locHay, raw)) return true;
+  return isClientWorldwideRemote(job);
+}
+
 function isLiveApiFeedJob(job: JobListing): boolean {
   return (
+    job.id.startsWith('ats_') ||
     job.id.startsWith('arbeitnow-') ||
     job.id.startsWith('remotive-') ||
     job.id.startsWith('themuse-') ||
-    /arbeitnow|remotive|the muse/i.test(job.sourceName)
+    job.id.startsWith('feed_jobicy_') ||
+    job.id.startsWith('feed_himalayas_') ||
+    /arbeitnow|remotive|the muse|jobicy|himalayas|greenhouse|lever|ashby|workday|smartrecruiters|official ats/i.test(job.sourceName)
   );
 }
 
@@ -66,6 +275,7 @@ export function GlobalJobSearch({
   onAnalyzeAtsForJob,
   onOpenMatchForJob,
   onOpenCompanyIntel,
+  onOpenApplyModal,
   initialQuery = '',
   initialCountry = '',
   externalSearchTrigger,
@@ -98,12 +308,40 @@ export function GlobalJobSearch({
   const [searchSummary, setSearchSummary] = useState<string | null>(null);
   const [groundingSources, setGroundingSources] = useState<GroundingSource[]>([]);
 
+  const [autoLoaded, setAutoLoaded] = useState(false);
+
   useEffect(() => {
     if (externalSearchTrigger > 0) {
       setQuery(initialQuery);
       setCountry(initialCountry);
     }
   }, [externalSearchTrigger, initialQuery, initialCountry]);
+
+  // Automatically fetch real live job feeds + verified ATS jobs when no jobs are loaded yet
+  useEffect(() => {
+    if (autoLoaded || jobs.length > 0) return;
+    setAutoLoaded(true);
+    let active = true;
+    setFeedsLoading(true);
+    fetchLiveJobFeeds({ query: initialQuery, country: initialCountry })
+      .then((res) => {
+        if (!active) return;
+        setFeedProviders(res.activeProviders || []);
+        if (res.jobs.length > 0) {
+          onJobsUpdate(res.jobs);
+          setSelectedId(res.jobs[0].id);
+        }
+      })
+      .catch(() => {
+        // non-blocking; user can retry via button
+      })
+      .finally(() => {
+        if (active) setFeedsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [autoLoaded, jobs.length, initialQuery, initialCountry, onJobsUpdate]);
 
   const filteredJobs = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -129,8 +367,8 @@ export function GlobalJobSearch({
       ) {
         return false;
       }
-      if (ctry && !job.country.toLowerCase().includes(ctry)) return false;
-      if (cty && !job.city.toLowerCase().includes(cty)) return false;
+      if (ctry && !matchesClientGeography(job, country)) return false;
+      if (cty && !normGeo(job.city).includes(normGeo(city))) return false;
       if (workMode && job.workMode !== workMode) return false;
       if (contractType && job.contractType !== contractType) return false;
       if (
@@ -226,13 +464,14 @@ export function GlobalJobSearch({
     }
   };
 
-  const handleLoadLiveFeeds = async () => {
+  const handleLoadLiveFeeds = async (overrideCountry?: string) => {
+    const targetCountry = overrideCountry !== undefined ? overrideCountry : country;
     setFeedsLoading(true);
     setError(null);
     try {
       const res = await fetchLiveJobFeeds({
         query,
-        country,
+        country: targetCountry,
         city,
         workMode,
         contractType,
@@ -243,13 +482,13 @@ export function GlobalJobSearch({
         const retained = jobs.filter((j) => !incomingIds.has(j.id));
         onJobsUpdate([...res.jobs, ...retained]);
         setSelectedId(res.jobs[0].id);
-        setSourceFilter('live_feeds');
+        setSourceFilter('all');
       } else {
         setError(
           L(
             lang,
-            'Aucune offre directe retournée pour ces filtres. Essayez une requête plus large.',
-            'No live API feed listings returned for these filters. Try broadening your query.'
+            'Aucune offre directe retournée pour ces filtres. Essayez une requête plus large ou lancez la Recherche IA.',
+            'No live API feed listings returned for these filters. Try broadening your query or run Live AI Search.'
           )
         );
       }
@@ -258,6 +497,12 @@ export function GlobalJobSearch({
     } finally {
       setFeedsLoading(false);
     }
+  };
+
+  const handleSelectRegion = (regionQuery: string) => {
+    setCountry(regionQuery);
+    setCity('');
+    void handleLoadLiveFeeds(regionQuery);
   };
 
   const handleSearchByGeoLocation = async (loc: { country: string; city: string }) => {
@@ -354,8 +599,8 @@ export function GlobalJobSearch({
                 onChange={(e) => setCountry(e.target.value)}
                 placeholder={L(
                   lang,
-                  'Pays (France, Suisse, Canada…)',
-                  'Country (France, Switzerland, Canada…)'
+                  'Pays ou région (Haïti, Canada, France, Brésil, Japon, Australie…)',
+                  'Country or region (Haiti, Canada, France, Brazil, Japan, Australia…)'
                 )}
                 className="w-full text-sm text-jf-navy placeholder:text-slate-400 focus:outline-none"
               />
@@ -418,7 +663,7 @@ export function GlobalJobSearch({
                 ) : (
                   <Rss className="w-3.5 h-3.5 text-jf-sky" />
                 )}
-                <span>{tr.common.liveFeeds} (Arbeitnow · Remotive · The Muse)</span>
+                <span>{tr.common.liveFeeds} (ATS · Jobicy · Himalayas · Remotive · Arbeitnow · Muse)</span>
               </button>
 
               <button
@@ -449,6 +694,33 @@ export function GlobalJobSearch({
             <span className="font-mono tabular-nums text-jf-sky">
               {filteredJobs.length} {L(lang, 'résultats affichés', 'results shown')}
             </span>
+          </div>
+
+          {/* 7-Continent International Quick Filter Strip */}
+          <div className="flex flex-wrap items-center gap-1.5 pt-2 border-t border-white/10">
+            <span className="text-[11px] font-medium text-jf-sky/80 mr-1">
+              {L(lang, 'Zones internationales :', 'Global regions:')}
+            </span>
+            {GLOBAL_REGIONS.map((reg) => {
+              const isActive =
+                (reg.queryValue === '' && !country.trim()) ||
+                normGeo(country) === normGeo(reg.queryValue);
+              return (
+                <button
+                  key={reg.id}
+                  type="button"
+                  onClick={() => handleSelectRegion(reg.queryValue)}
+                  disabled={feedsLoading}
+                  className={`px-2.5 py-1 text-[11px] font-medium rounded-md border transition-colors whitespace-nowrap ${
+                    isActive
+                      ? 'bg-jf-sky text-jf-navy border-jf-sky font-semibold'
+                      : 'bg-jf-dark/70 text-jf-soft border-jf-sky/25 hover:bg-jf-blue hover:text-white'
+                  }`}
+                >
+                  {lang === 'fr' ? reg.labelFr : reg.labelEn}
+                </button>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -828,6 +1100,36 @@ export function GlobalJobSearch({
                         )}
                         <span>{isTracked ? tr.common.savedInTracker : tr.common.saveToTracker}</span>
                       </button>
+                      {onOpenApplyModal && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onOpenApplyModal({
+                              companyId: selectedJob.companyId,
+                              companyName: selectedJob.company,
+                              roleTitle: selectedJob.title,
+                              location: [selectedJob.city, selectedJob.country]
+                                .filter(Boolean)
+                                .join(', '),
+                              opportunityType: 'published_job',
+                              classification: 'confirmed_job',
+                              officialUrl: selectedJob.sourceUrl,
+                              sourceName: selectedJob.sourceName,
+                              publishedDate: selectedJob.publishedDate,
+                              applicationDeadline: selectedJob.applicationDeadline,
+                              salaryRange: selectedJob.salaryRange,
+                              description: selectedJob.description,
+                              inferredSkills: selectedJob.skills,
+                              isEmployerDirect: selectedJob.isEmployerDirect,
+                              recruiterId: selectedJob.recruiterId,
+                            })
+                          }
+                          className="px-4 py-2 text-xs font-semibold text-white bg-jf-navy hover:bg-jf-dark rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+                        >
+                          <Send className="w-3.5 h-3.5" />
+                          <span>{lang === 'fr' ? 'Postuler' : 'Apply Now'}</span>
+                        </button>
+                      )}
                       {(() => {
                         const safeSourceHref = safeExternalUrl(selectedJob.sourceUrl);
                         if (!safeSourceHref) return null;
@@ -874,9 +1176,20 @@ export function GlobalJobSearch({
                     </div>
                     <div>
                       <div className="text-xs text-slate-500">
-                        {lang === 'fr' ? 'Sponsoring Visa' : 'Visa Sponsorship'}
+                        {selectedJob.applicationDeadline
+                          ? lang === 'fr'
+                            ? 'Date limite / Visa'
+                            : 'Deadline / Visa'
+                          : lang === 'fr'
+                            ? 'Sponsoring Visa'
+                            : 'Visa Sponsorship'}
                       </div>
                       <div className="mt-1 font-medium text-slate-900">
+                        {selectedJob.applicationDeadline ? (
+                          <span className="font-mono text-xs text-jf-blue mr-1.5">
+                            {selectedJob.applicationDeadline.slice(0, 10)} ·
+                          </span>
+                        ) : null}
                         {selectedJob.visaSponsorship || 'Not specified'}
                       </div>
                     </div>
@@ -958,7 +1271,7 @@ export function GlobalJobSearch({
                       >
                         <SlidersHorizontal className="w-3.5 h-3.5" />
                         <span>
-                          {lang === 'fr' ? 'Analyse 8 critères IA' : '8-Dimension AI Match'}
+                          {lang === 'fr' ? 'Analyse 9 critères IA' : '9-Dimension AI Match'}
                         </span>
                       </button>
                     </div>

@@ -1,135 +1,126 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import {
   ArrowRight,
+  ArrowUpRight,
   Building2,
   Check,
   CheckCircle2,
   FileText,
   Globe,
+  Loader2,
   Mail,
   MapPin,
   MessageSquareText,
   Radar,
 } from 'lucide-react';
-import { Lang, WorkspaceTab } from '../../types';
+import { JobListing, Lang, WorkspaceTab } from '../../types';
 import { pickLang } from '../../i18n';
+import { fetchLiveJobFeeds } from '../../utils/api';
+import { safeExternalUrl } from '../../utils/safeUrl';
 
 interface ShowcaseProps {
   lang: Lang;
   onNavigate: (tab: WorkspaceTab, careerSubTab?: 'tracker' | 'interview' | 'mobility') => void;
 }
 
-type SignalLayer = 'all' | 'published' | 'identified' | 'signals' | 'verify';
-
-interface DemoOpportunity {
+interface LiveRadarOpportunity {
   id: string;
   company: string;
+  title: string;
   city: string;
   country: string;
-  layer: Exclude<SignalLayer, 'all'>;
-  categoryLabelFr: string;
-  categoryLabelEn: string;
-  signalFr: string;
-  signalEn: string;
-  roles: string[];
+  sourceName: string;
+  sourceUrl: string;
+  workMode: string;
+  publishedDate: string;
   mapX: number;
   mapY: number;
 }
 
-const DEMO_OPPORTUNITIES: DemoOpportunity[] = [
-  {
-    id: 'demo-1',
-    company: 'Qonto',
-    city: 'Paris',
-    country: 'France',
-    layer: 'published',
-    categoryLabelFr: 'Offre publiée',
-    categoryLabelEn: 'Published Job',
-    signalFr: 'Poste officiellement ouvert sur le portail carrières européen',
-    signalEn: 'Officially published on European corporate careers portal',
-    roles: ['Senior Product Manager', 'Staff Frontend Engineer'],
-    mapX: 47,
-    mapY: 36,
-  },
-  {
-    id: 'demo-2',
-    company: 'Helvetia Tech',
-    city: 'Zurich',
-    country: 'Suisse',
-    layer: 'identified',
-    categoryLabelFr: 'Opportunité identifiée',
-    categoryLabelEn: 'Identified Opportunity',
-    signalFr: 'Création annoncée d’un pôle Data & IA (18 recrutements prévus)',
-    signalEn: 'Announced Data & AI hub launch (18 planned hires)',
-    roles: ['Data Architect', 'AI Product Lead'],
-    mapX: 52,
-    mapY: 40,
-  },
-  {
-    id: 'demo-3',
-    company: 'NordGrid Energy',
-    city: 'Berlin',
-    country: 'Allemagne',
-    layer: 'signals',
-    categoryLabelFr: 'Signal de recrutement',
-    categoryLabelEn: 'Hiring Signal',
-    signalFr: 'Série B clôturée + ouverture de nouveaux bureaux DACH',
-    signalEn: 'Series B closed + new DACH office expansion',
-    roles: ['Operations Manager', 'Full-Stack Engineer'],
-    mapX: 54,
-    mapY: 32,
-  },
-  {
-    id: 'demo-4',
-    company: 'Atlas Cloud Systems',
-    city: 'Montréal',
-    country: 'Canada',
-    layer: 'verify',
-    categoryLabelFr: 'Potentielle · À vérifier',
-    categoryLabelEn: 'Potential · Verify',
-    signalFr: 'Nouveau contrat d’infrastructure — besoin RH à confirmer',
-    signalEn: 'New infrastructure contract — staffing needs to be verified',
-    roles: ['Cloud Consultant', 'Delivery Lead'],
-    mapX: 25,
-    mapY: 35,
-  },
-  {
-    id: 'demo-5',
-    company: 'Meridian FinOps',
-    city: 'Londres',
-    country: 'Royaume-Uni',
-    layer: 'signals',
-    categoryLabelFr: 'Signal de recrutement',
-    categoryLabelEn: 'Hiring Signal',
-    signalFr: 'Croissance de l’équipe commerciale Europe (+22 % en 6 mois)',
-    signalEn: 'European commercial team growth (+22% in 6 months)',
-    roles: ['Account Executive', 'Solutions Architect'],
-    mapX: 44,
-    mapY: 31,
-  },
-  {
-    id: 'demo-6',
-    company: 'Pacific Robotics',
-    city: 'Singapour',
-    country: 'Singapour',
-    layer: 'identified',
-    categoryLabelFr: 'Opportunité identifiée',
-    categoryLabelEn: 'Identified Opportunity',
-    signalFr: 'Déploiement d’une nouvelle ligne produit APAC',
-    signalEn: 'New APAC product line rollout',
-    roles: ['Embedded Systems Lead', 'Supply Chain Analyst'],
-    mapX: 79,
-    mapY: 60,
-  },
-];
+function approximateWorldMapCoords(country: string, city: string, idx: number): { mapX: number; mapY: number } {
+  const hay = `${country} ${city}`.toLowerCase();
+  if (/united states|usa|new york|san francisco|austin|seattle|boston|canada|toronto|montreal|mexico/.test(hay)) {
+    return { mapX: 22 + (idx % 3) * 4, mapY: 36 + (idx % 2) * 6 };
+  }
+  if (/caribbean|caraibes|haiti|haïti|port-au-prince|jamaica|dominican|puerto rico|barbados|bahamas|trinidad|cuba|guadeloupe|martinique/.test(hay)) {
+    return { mapX: 25 + (idx % 2) * 3, mapY: 51 + (idx % 2) * 3 };
+  }
+  if (/brazil|brasil|argentina|colombia|chile|peru|uruguay|ecuador|latam|latin america/.test(hay)) {
+    return { mapX: 30 + (idx % 3) * 3, mapY: 66 + (idx % 2) * 7 };
+  }
+  if (/africa|south africa|kenya|nigeria|morocco|senegal|egypt|tunisia|ghana|rwanda/.test(hay)) {
+    return { mapX: 52 + (idx % 3) * 4, mapY: 62 + (idx % 2) * 8 };
+  }
+  if (/australia|new zealand|sydney|melbourne|auckland|oceania/.test(hay)) {
+    return { mapX: 84 + (idx % 2) * 4, mapY: 74 };
+  }
+  if (/japan|singapore|india|korea|vietnam|philippines|indonesia|malaysia|thailand|dubai|uae|asia|apac|tokyo/.test(hay)) {
+    return { mapX: 73 + (idx % 3) * 4, mapY: 44 + (idx % 2) * 8 };
+  }
+  if (/france|germany|uk|united kingdom|switzerland|netherlands|spain|italy|poland|ireland|sweden|portugal|belgium|europe|berlin|paris|london|amsterdam|zurich/.test(hay)) {
+    return { mapX: 48 + (idx % 3) * 4, mapY: 32 + (idx % 2) * 6 };
+  }
+  // Worldwide remote spread across hubs
+  const presets = [
+    { mapX: 25, mapY: 37 },
+    { mapX: 49, mapY: 34 },
+    { mapX: 32, mapY: 64 },
+    { mapX: 53, mapY: 60 },
+    { mapX: 76, mapY: 46 },
+    { mapX: 85, mapY: 74 },
+  ];
+  return presets[idx % presets.length];
+}
 
 export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
   const [activePreview, setActivePreview] = useState<'hidden' | 'cv' | 'interview'>('hidden');
-  const [layerFilter, setLayerFilter] = useState<SignalLayer>('all');
-  const [selectedHubId, setSelectedHubId] = useState<string>('demo-2');
+  const [liveJobs, setLiveJobs] = useState<LiveRadarOpportunity[]>([]);
+  const [loadingLive, setLoadingLive] = useState(true);
+  const [selectedHubId, setSelectedHubId] = useState<string>('');
 
   const isFr = lang === 'fr';
+
+  useEffect(() => {
+    let active = true;
+    setLoadingLive(true);
+    fetchLiveJobFeeds({ country: '' })
+      .then((res) => {
+        if (!active) return;
+        const picked: LiveRadarOpportunity[] = [];
+        const seenCompanies = new Set<string>();
+        for (const job of (res.jobs || []) as JobListing[]) {
+          const key = job.company.toLowerCase();
+          if (seenCompanies.has(key) || !job.sourceUrl) continue;
+          seenCompanies.add(key);
+          const coords = approximateWorldMapCoords(job.country, job.city, picked.length);
+          picked.push({
+            id: job.id,
+            company: job.company,
+            title: job.title,
+            city: job.city || 'Remote',
+            country: job.country || 'International',
+            sourceName: job.sourceName,
+            sourceUrl: job.sourceUrl,
+            workMode: job.workMode,
+            publishedDate: job.publishedDate,
+            ...coords,
+          });
+          if (picked.length >= 6) break;
+        }
+        setLiveJobs(picked);
+        if (picked[0]) setSelectedHubId(picked[0].id);
+      })
+      .catch(() => {
+        if (active) setLiveJobs([]);
+      })
+      .finally(() => {
+        if (active) setLoadingLive(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const tabs = [
     {
@@ -148,12 +139,12 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
       id: 'hidden' as const,
       icon: Radar,
       label: pickLang(lang, {
-        fr: 'Marché caché',
-        en: 'Hidden Market',
-        es: 'Mercado oculto',
-        de: 'Verdeckter Markt',
-        pt: 'Mercado oculto',
-        ar: 'السوق المخفي',
+        fr: 'Offres & Radar mondial',
+        en: 'Live Global Radar',
+        es: 'Radar Global',
+        de: 'Globales Radar',
+        pt: 'Radar Global',
+        ar: 'الرادار العالمي',
       }),
     },
     {
@@ -170,21 +161,8 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
     },
   ];
 
-  const layerOptions: Array<{ id: SignalLayer; label: string }> = [
-    { id: 'all', label: isFr ? 'Tous (4 niveaux)' : 'All (4 levels)' },
-    { id: 'published', label: isFr ? '1. Offres publiées' : '1. Published' },
-    { id: 'identified', label: isFr ? '2. Opportunités identifiées' : '2. Identified' },
-    { id: 'signals', label: isFr ? '3. Signaux d’activité' : '3. Signals' },
-    { id: 'verify', label: isFr ? '4. À vérifier' : '4. Verify' },
-  ];
-
-  const visibleOpps =
-    layerFilter === 'all'
-      ? DEMO_OPPORTUNITIES
-      : DEMO_OPPORTUNITIES.filter((o) => o.layer === layerFilter);
-
   const selectedOpp =
-    visibleOpps.find((o) => o.id === selectedHubId) ?? visibleOpps[0] ?? DEMO_OPPORTUNITIES[0];
+    liveJobs.find((o) => o.id === selectedHubId) ?? liveJobs[0] ?? null;
 
   return (
     <div className="space-y-8">
@@ -228,37 +206,26 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
               <div className="space-y-2 max-w-2xl">
                 <div className="text-xs font-semibold text-jf-blue">
                   {isFr
-                    ? 'Radar International · Démonstration interactive (exemples illustratifs)'
-                    : 'International Radar · Interactive Demo (Illustrative Examples)'}
+                    ? 'Radar International · Flux en direct vérifiés (zéro donnée fictive)'
+                    : 'International Radar · Verified Live Feeds (Zero Mock Data)'}
                 </div>
                 <h2 className="font-display text-2xl sm:text-3xl lg:text-4xl font-bold text-jf-navy tracking-tight">
                   {isFr
-                    ? 'Les opportunités ne sont pas toujours publiées. Nous allons les chercher.'
-                    : 'Opportunities are not always posted. We go find them.'}
+                    ? 'Offres réelles sur 7 zones mondiales et détection d’opportunités cachées.'
+                    : 'Real opportunities across 7 global regions & hidden market discovery.'}
                 </h2>
                 <p className="text-sm sm:text-base text-slate-600 leading-relaxed">
                   {isFr
-                    ? 'Certaines entreprises recherchent de nouveaux collaborateurs sans publier d’annonce. JOBFOUNDS analyse les signaux de recrutement, identifie les entreprises susceptibles de recruter et vous aide à découvrir des opportunités avant leur publication officielle.'
-                    : 'Some companies look for new talent before posting publicly. JOBFOUNDS analyzes hiring signals, surfaces expanding organizations, and helps you discover opportunities ahead of public listings.'}
+                    ? 'JOBFOUNDS agrège des offres vérifiées depuis les portails ATS officiels et les flux internationaux publics, puis analyse les signaux publics des entreprises qui recrutent.'
+                    : 'JOBFOUNDS aggregates verified listings from official ATS portals and global public feeds, while detecting public hiring signals from expanding organizations.'}
                 </p>
               </div>
-
-              {/* 4-Level Transparency Filter */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {layerOptions.map((opt) => (
-                  <button
-                    key={opt.id}
-                    type="button"
-                    onClick={() => setLayerFilter(opt.id)}
-                    className={`px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors whitespace-nowrap ${
-                      layerFilter === opt.id
-                        ? 'bg-jf-navy text-white border-jf-navy'
-                        : 'bg-jf-ice text-jf-dark border-jf-border hover:bg-jf-soft'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+              <div className="text-xs font-mono text-jf-dark bg-jf-ice border border-jf-border rounded-lg px-3 py-1.5">
+                {loadingLive
+                  ? isFr
+                    ? 'Chargement des flux réels…'
+                    : 'Loading live feeds…'
+                  : `${liveJobs.length} ${isFr ? 'offres réelles chargées' : 'live verified roles'}`}
               </div>
             </div>
 
@@ -349,11 +316,10 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
                   </div>
                 </div>
 
-                {/* Interactive Geo Pins */}
+                {/* Interactive Geo Pins from Real Live Feeds */}
                 <div className="relative z-10 flex-1 my-4">
-                  {DEMO_OPPORTUNITIES.map((hub) => {
-                    const isSelected = selectedOpp.id === hub.id;
-                    const isDimmed = layerFilter !== 'all' && hub.layer !== layerFilter;
+                  {liveJobs.map((hub) => {
+                    const isSelected = selectedOpp?.id === hub.id;
                     return (
                       <button
                         key={hub.id}
@@ -361,9 +327,7 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
                         onClick={() => setSelectedHubId(hub.id)}
                         style={{ left: `${hub.mapX}%`, top: `${hub.mapY}%` }}
                         aria-label={`${hub.company} - ${hub.city}`}
-                        className={`absolute -translate-x-1/2 -translate-y-1/2 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-jf-blue rounded-full ${
-                          isDimmed ? 'opacity-25 scale-90' : 'opacity-100'
-                        }`}
+                        className="absolute -translate-x-1/2 -translate-y-1/2 transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-jf-blue rounded-full"
                       >
                         <span
                           className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-semibold shadow-sm border transition-transform ${
@@ -377,93 +341,133 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
                               isSelected ? 'text-jf-sky' : 'text-jf-blue'
                             }`}
                           />
-                          <span className="whitespace-nowrap">{hub.city}</span>
+                          <span className="whitespace-nowrap max-w-[110px] truncate">{hub.company}</span>
                         </span>
                       </button>
                     );
                   })}
                 </div>
 
-                {/* Bottom Selected Signal Spotlight Bar */}
-                <div className="relative z-10 bg-white/95 backdrop-blur-xs border border-jf-border rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                  <div className="min-w-0 space-y-0.5">
-                    <div className="flex flex-wrap items-center gap-2 text-xs">
-                      <span className="font-bold text-jf-navy">{selectedOpp.company}</span>
-                      <span className="text-slate-400">·</span>
-                      <span className="text-slate-600">
-                        {selectedOpp.city}, {selectedOpp.country}
-                      </span>
-                      <span className="text-slate-400">·</span>
-                      <span className="font-semibold text-jf-blue">
-                        {isFr ? selectedOpp.categoryLabelFr : selectedOpp.categoryLabelEn}
-                      </span>
+                {/* Bottom Selected Live Opportunity Spotlight Bar */}
+                {selectedOpp ? (
+                  <div className="relative z-10 bg-white/95 backdrop-blur-xs border border-jf-border rounded-xl p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <div className="min-w-0 space-y-0.5">
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <span className="font-bold text-jf-navy">{selectedOpp.company}</span>
+                        <span className="text-slate-400">·</span>
+                        <span className="text-slate-600">
+                          {selectedOpp.city}, {selectedOpp.country}
+                        </span>
+                        <span className="text-slate-400">·</span>
+                        <span className="font-semibold text-jf-blue">{selectedOpp.sourceName}</span>
+                      </div>
+                      <p className="text-xs text-slate-700 font-medium truncate">
+                        {selectedOpp.title}
+                      </p>
                     </div>
-                    <p className="text-xs text-slate-600 truncate">
-                      {isFr ? selectedOpp.signalFr : selectedOpp.signalEn}
-                    </p>
+                    {safeExternalUrl(selectedOpp.sourceUrl) && (
+                      <a
+                        href={safeExternalUrl(selectedOpp.sourceUrl)!}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs font-semibold text-jf-blue hover:underline inline-flex items-center gap-1 shrink-0"
+                      >
+                        <span>{isFr ? 'Source officielle' : 'Official Source'}</span>
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                      </a>
+                    )}
                   </div>
-                  <div className="text-[11px] font-mono text-jf-dark shrink-0">
-                    {selectedOpp.roles.join(' · ')}
+                ) : (
+                  <div className="relative z-10 bg-white/95 border border-jf-border rounded-xl p-3.5 text-xs text-slate-600">
+                    {loadingLive
+                      ? isFr
+                        ? 'Connexion aux flux publics internationaux et portails ATS…'
+                        : 'Connecting to live international public feeds and ATS portals…'
+                      : isFr
+                        ? 'Ouvrez le moteur de recherche pour interroger les flux mondiaux en direct.'
+                        : 'Open Global Job Search to query live worldwide feeds.'}
                   </div>
-                </div>
+                )}
               </div>
 
-              {/* Right: Companies to Contact & Strict 4-Tier Classification List */}
+              {/* Right: Live Verified Opportunities List */}
               <div className="lg:col-span-5 rounded-2xl bg-jf-ice/70 border border-jf-border p-4 sm:p-5 flex flex-col justify-between gap-4">
                 <div className="space-y-3">
                   <div className="flex items-center justify-between gap-2 pb-2 border-b border-jf-border">
                     <span className="text-xs font-semibold text-jf-navy">
                       {isFr
-                        ? 'Entreprises & opportunités détectées'
-                        : 'Detected Companies & Signals'}
+                        ? 'Offres réelles en direct (sources vérifiées)'
+                        : 'Live Verified Openings'}
                     </span>
-                    <span className="text-[11px] font-mono text-slate-500">
-                      {isFr ? 'Exemples' : 'Examples'}
+                    <span className="text-[11px] font-mono text-jf-blue">
+                      {isFr ? 'En direct' : 'Live'}
                     </span>
                   </div>
 
-                  <div className="space-y-2.5 max-h-[295px] overflow-y-auto pr-1">
-                    {visibleOpps.map((item) => {
-                      const active = selectedOpp.id === item.id;
-                      return (
-                        <button
-                          key={item.id}
-                          type="button"
-                          onClick={() => setSelectedHubId(item.id)}
-                          className={`w-full text-left p-3.5 rounded-xl border transition-all ${
-                            active
-                              ? 'bg-white border-jf-blue shadow-sm'
-                              : 'bg-white/80 border-jf-border hover:bg-white'
-                          }`}
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span className="text-sm font-semibold text-jf-navy">
-                              {item.company}
-                            </span>
-                            <span className="text-[11px] font-semibold text-jf-blue whitespace-nowrap">
-                              {isFr ? item.categoryLabelFr : item.categoryLabelEn}
-                            </span>
-                          </div>
-                          <p className="mt-1 text-xs text-slate-600 leading-snug">
-                            {isFr ? item.signalFr : item.signalEn}
-                          </p>
-                          <div className="mt-2 flex items-center justify-between text-[11px] text-slate-500">
-                            <span className="truncate">{item.roles.join(' · ')}</span>
-                            <span className="shrink-0 font-medium text-jf-dark ml-2">
-                              {item.city}
-                            </span>
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
+                  {loadingLive ? (
+                    <div className="py-16 flex flex-col items-center justify-center gap-2 text-xs text-slate-500">
+                      <Loader2 className="w-5 h-5 animate-spin text-jf-blue" />
+                      <span>{isFr ? 'Récupération des offres réelles…' : 'Fetching real listings…'}</span>
+                    </div>
+                  ) : liveJobs.length === 0 ? (
+                    <div className="py-12 text-center text-xs text-slate-600 space-y-2">
+                      <p>
+                        {isFr
+                          ? 'Aucune offre chargée dans cet aperçu. Lancez la recherche mondiale pour interroger les sources en direct.'
+                          : 'No live listings loaded in this preview. Open Global Search to query live feeds.'}
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => onNavigate('jobs')}
+                        className="px-3.5 py-1.5 text-xs font-semibold text-white bg-jf-blue rounded-lg"
+                      >
+                        {isFr ? 'Ouvrir la recherche mondiale' : 'Open Global Search'}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5 max-h-[295px] overflow-y-auto pr-1">
+                      {liveJobs.map((item) => {
+                        const active = selectedOpp?.id === item.id;
+                        return (
+                          <button
+                            key={item.id}
+                            type="button"
+                            onClick={() => setSelectedHubId(item.id)}
+                            className={`w-full text-left p-3.5 rounded-xl border transition-all ${
+                              active
+                                ? 'bg-white border-jf-blue shadow-sm'
+                                : 'bg-white/80 border-jf-border hover:bg-white'
+                            }`}
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="text-sm font-semibold text-jf-navy truncate">
+                                {item.company}
+                              </span>
+                              <span className="text-[11px] font-semibold text-jf-blue whitespace-nowrap shrink-0">
+                                {item.workMode}
+                              </span>
+                            </div>
+                            <p className="mt-1 text-xs text-slate-700 font-medium leading-snug line-clamp-1">
+                              {item.title}
+                            </p>
+                            <div className="mt-1.5 flex items-center justify-between text-[11px] text-slate-500">
+                              <span className="truncate">{item.sourceName}</span>
+                              <span className="shrink-0 font-medium text-jf-dark ml-2">
+                                {item.country}
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
 
                 {/* Honesty & Transparency Safeguard Note */}
                 <p className="text-[11px] text-slate-500 leading-relaxed pt-2 border-t border-jf-border">
                   {isFr
-                    ? 'Transparence JOBFOUNDS : chaque signal distingue clairement une annonce publiée d’une opportunité potentielle à vérifier. Aucune hypothèse n’est présentée comme offre confirmée.'
-                    : 'JOBFOUNDS Transparency: every signal strictly separates verified job postings from potential opportunities requiring human verification.'}
+                    ? 'Transparence JOBFOUNDS : aucune entreprise ni offre fictive n’est affichée. Chaque carte provient d’une source publique vérifiable avec lien officiel.'
+                    : 'JOBFOUNDS Transparency: zero fabricated companies or mock listings. Every item comes from a verifiable public source with an official link.'}
                 </p>
               </div>
             </div>
@@ -601,27 +605,33 @@ export function DecisionMakerInboxDemo({ lang }: { lang: Lang }) {
   const isFr = lang === 'fr';
   const [selectedRow, setSelectedRow] = useState(0);
 
-  const sampleThreads = [
+  const workflowSteps = [
     {
       title: isFr
-        ? 'Candidature spontanée — Direction Produit'
-        : 'Spontaneous Outreach — Product Leadership',
-      sender: isFr ? 'Exemple · Responsable Recrutement · Paris' : 'Example · Head of Talent · Paris',
-      status: isFr ? 'Échange planifié' : 'Call scheduled',
+        ? '1. Préparation & autorisation explicite'
+        : '1. Preparation & Explicit Approval',
+      sender: isFr
+        ? 'Adaptation du CV, lettre de motivation et vérification du canal officiel'
+        : 'CV tailoring, cover letter drafting, and official channel verification',
+      status: isFr ? 'Validation requise' : 'Approval required',
     },
     {
       title: isFr
-        ? 'Réponse recruteur — Ingénierie Plateforme'
-        : 'Recruiter Reply — Platform Engineering',
-      sender: isFr ? 'Exemple · Directeur Technique · Zurich' : 'Example · Engineering Director · Zurich',
-      status: isFr ? 'Entretien proposé' : 'Interview invited',
+        ? '2. Transmission réelle avec preuve serveur'
+        : '2. Real Delivery with Server Proof',
+      sender: isFr
+        ? 'Envoi direct JOBFOUNDS, e-mail Resend avec pièces jointes ou portail ATS officiel'
+        : 'Direct JOBFOUNDS inbox, Resend email with attachments, or official ATS portal',
+      status: isFr ? 'Reçu horodaté' : 'Timestamped receipt',
     },
     {
       title: isFr
-        ? 'Prise de contact directe — Expansion Europe'
-        : 'Direct Outreach — Europe Expansion',
-      sender: isFr ? 'Exemple · Talent Partner · Berlin' : 'Example · Talent Partner · Berlin',
-      status: isFr ? 'Profil retenu' : 'Shortlisted',
+        ? '3. Suivi des réponses recruteurs (CRM & Gmail)'
+        : '3. Recruiter Reply Sync (CRM & Gmail)',
+      sender: isFr
+        ? 'Réponses employeurs en direct et synchronisation Gmail lecture seule autorisée'
+        : 'Live employer replies and user-authorized read-only Gmail synchronization',
+      status: isFr ? 'Sync automatique' : 'Auto-synced',
     },
   ];
 
@@ -631,10 +641,10 @@ export function DecisionMakerInboxDemo({ lang }: { lang: Lang }) {
         {/* Card Header */}
         <div className="flex items-center justify-between gap-3 pb-4 border-b border-jf-border">
           <div className="text-sm font-bold text-jf-navy">
-            {isFr ? 'Boîte de réception professionnelle' : 'Professional Outreach Inbox'}
+            {isFr ? 'Parcours de candidature vérifié' : 'Verified Application Workflow'}
           </div>
           <span className="text-[11px] font-medium text-jf-blue">
-            {isFr ? 'Exemple illustratif' : 'Illustrative example'}
+            {isFr ? 'Zéro simulation' : 'Zero simulation'}
           </span>
         </div>
 
@@ -642,18 +652,15 @@ export function DecisionMakerInboxDemo({ lang }: { lang: Lang }) {
         <div className="flex flex-col items-center text-center space-y-2 py-1">
           <div className="relative w-14 h-14 rounded-2xl bg-jf-navy flex items-center justify-center shadow-md">
             <Mail className="w-6 h-6 text-jf-sky" />
-            <span className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-jf-blue text-white text-xs font-mono font-bold flex items-center justify-center border-2 border-white">
-              3
-            </span>
           </div>
           <div className="text-sm font-semibold text-jf-navy">
-            {isFr ? 'Suivi des réponses & entretiens' : 'Replies & Interview Invitations'}
+            {isFr ? 'Candidat → Employeur → Réponse → CRM' : 'Candidate → Employer → Reply → CRM'}
           </div>
         </div>
 
-        {/* Sample Interactive Rows */}
+        {/* Real Workflow Rows */}
         <div className="space-y-3">
-          {sampleThreads.map((row, idx) => {
+          {workflowSteps.map((row, idx) => {
             const active = selectedRow === idx;
             return (
               <button
@@ -686,7 +693,7 @@ export function DecisionMakerInboxDemo({ lang }: { lang: Lang }) {
         </div>
       </div>
 
-      {/* Floating Bottom-Right Confirmation Card (Inspired by Reference #3) */}
+      {/* Floating Bottom-Right Safeguard Callout */}
       <motion.div
         initial={{ opacity: 0, y: 12 }}
         whileInView={{ opacity: 1, y: 0 }}
@@ -699,10 +706,10 @@ export function DecisionMakerInboxDemo({ lang }: { lang: Lang }) {
         </div>
         <div>
           <div className="text-xs font-bold text-jf-navy">
-            {isFr ? 'Invitation entretien (exemple)' : 'Interview invite (example)'}
+            {isFr ? 'Envoi tracé & vérifié' : 'Verified delivery proof'}
           </div>
           <div className="text-[11px] text-slate-500">
-            {isFr ? 'Envoi validé par le candidat' : 'Candidate-approved outreach'}
+            {isFr ? 'Jamais marqué envoyé sans preuve' : 'Never marked sent without proof'}
           </div>
         </div>
       </motion.div>
@@ -740,7 +747,7 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
       {/* Template Interactive Switcher */}
       <div className="relative z-10 flex flex-wrap items-center justify-between gap-2 mb-5">
         <span className="text-xs font-semibold text-jf-dark">
-          {isFr ? 'Aperçu interactif · Exemple de CV' : 'Interactive Preview · Sample Resume'}
+          {isFr ? 'Modèles de mise en page CV (structure)' : 'CV Layout Templates (Structure)'}
         </span>
         <div className="inline-flex items-center gap-1 p-1 bg-white border border-jf-border rounded-lg">
           {(
@@ -766,20 +773,20 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
         </div>
       </div>
 
-      {/* Main Crisp CV Sheet (Inspired by Reference #4) */}
+      {/* Structural CV Layout Preview (Zero fictional persona) */}
       <div className="relative z-10 mx-auto max-w-[440px] rounded-2xl overflow-hidden bg-white border border-jf-border shadow-[0_24px_55px_-22px_rgba(6,19,47,0.28)] grid grid-cols-12">
         {/* CV Left Column */}
         <div className={`col-span-5 p-4 sm:p-5 space-y-4 ${sidebarBg} transition-colors`}>
-          <div className="w-12 h-12 rounded-full bg-jf-blue/25 border-2 border-jf-sky flex items-center justify-center font-display font-bold text-sm">
-            CL
+          <div className="w-12 h-12 rounded-full bg-jf-blue/25 border-2 border-jf-sky flex items-center justify-center font-display font-bold text-xs">
+            CV
           </div>
           <div className="space-y-1">
             <div className={`text-[10px] font-bold tracking-wider uppercase ${sidebarAccent}`}>
               {isFr ? 'Coordonnées' : 'Contact'}
             </div>
             <div className="text-[11px] opacity-85 space-y-0.5">
-              <div>Paris · Genève</div>
-              <div>FR · EN · DE</div>
+              <div>{isFr ? 'Votre ville · Pays' : 'Your City · Country'}</div>
+              <div>{isFr ? 'Votre e-mail' : 'Your email'}</div>
             </div>
           </div>
           <div className="space-y-2">
@@ -787,17 +794,14 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
               {isFr ? 'Compétences clés' : 'Core Skills'}
             </div>
             {[
-              { label: 'Product Strategy', pct: '92%' },
-              { label: 'Data & SQL', pct: '85%' },
-              { label: 'International Scale', pct: '88%' },
-            ].map((s) => (
-              <div key={s.label} className="space-y-1">
-                <div className="text-[10px] opacity-90">{s.label}</div>
+              isFr ? 'Compétence métier #1' : 'Core skill #1',
+              isFr ? 'Compétence technique #2' : 'Technical skill #2',
+              isFr ? 'Outil / Méthodologie #3' : 'Tool / Method #3',
+            ].map((label) => (
+              <div key={label} className="space-y-1">
+                <div className="text-[10px] opacity-90">{label}</div>
                 <div className="h-1.5 rounded-full bg-white/20 overflow-hidden">
-                  <div
-                    className="h-full rounded-full bg-jf-sky"
-                    style={{ width: s.pct }}
-                  />
+                  <div className="h-full rounded-full bg-jf-sky w-3/4" />
                 </div>
               </div>
             ))}
@@ -807,8 +811,8 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
               {isFr ? 'Langues' : 'Languages'}
             </div>
             <div className="text-[10px] opacity-85 space-y-0.5">
-              <div>Français — Natif</div>
-              <div>English — C1</div>
+              <div>{isFr ? 'Langue 1 · Niveau' : 'Language 1 · Level'}</div>
+              <div>{isFr ? 'Langue 2 · Niveau' : 'Language 2 · Level'}</div>
             </div>
           </div>
         </div>
@@ -818,48 +822,43 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
           <div className="flex items-start justify-between gap-2 pb-2.5 border-b border-jf-border">
             <div>
               <div className="font-display text-base font-bold leading-tight">
-                Camille Laurent
+                {isFr ? 'Votre Nom Complet' : 'Your Full Name'}
               </div>
               <div className="text-xs font-medium text-jf-blue">
-                Senior Product Manager
+                {isFr ? 'Intitulé de poste ciblé' : 'Target Job Title'}
               </div>
             </div>
             <span className="font-mono text-[10px] font-bold px-2 py-0.5 rounded bg-jf-soft text-jf-navy">
-              ATS 94%
+              ATS
             </span>
           </div>
 
           <div className="space-y-1">
             <div className="text-[10px] font-bold tracking-wider uppercase text-jf-blue">
-              {isFr ? 'Profil' : 'Summary'}
+              {isFr ? 'Synthèse' : 'Summary'}
             </div>
             <p className="text-[11px] text-slate-600 leading-relaxed">
               {isFr
-                ? '7 ans d’expérience dans le pilotage de produits SaaS B2B européens, structuration de roadmaps data-driven et coordination multi-pays.'
-                : '7 years leading European B2B SaaS products, data-driven roadmaps, and cross-border launches.'}
+                ? 'Importez votre CV PDF ou Word (.docx) : JOBFOUNDS structure votre parcours réel sans jamais inventer d’expériences.'
+                : 'Import your real PDF or Word (.docx) CV: JOBFOUNDS structures your real background without fabricating experience.'}
             </p>
           </div>
 
           <div className="space-y-2">
             <div className="text-[10px] font-bold tracking-wider uppercase text-jf-blue">
-              {isFr ? 'Expériences' : 'Experience'}
+              {isFr ? 'Expériences professionnelles' : 'Professional Experience'}
             </div>
             <div>
-              <div className="text-[11px] font-bold text-jf-navy">Lead Product Manager</div>
-              <div className="text-[10px] text-slate-500">FinTech Europe · 2023 – 2026</div>
+              <div className="text-[11px] font-bold text-jf-navy">
+                {isFr ? 'Poste occupé' : 'Role Title'}
+              </div>
+              <div className="text-[10px] text-slate-500">
+                {isFr ? 'Entreprise · Période' : 'Company · Dates'}
+              </div>
               <p className="text-[10px] text-slate-600 mt-0.5 leading-snug">
                 {isFr
-                  ? '• Lancement de 3 marchés européens et amélioration de la conversion onboarding.'
-                  : '• Launched 3 European markets and improved onboarding activation.'}
-              </p>
-            </div>
-            <div>
-              <div className="text-[11px] font-bold text-jf-navy">Product Manager</div>
-              <div className="text-[10px] text-slate-500">CloudPay Studio · 2020 – 2023</div>
-              <p className="text-[10px] text-slate-600 mt-0.5 leading-snug">
-                {isFr
-                  ? '• Pilotage de la plateforme API et des intégrations partenaires.'
-                  : '• Led core API platform and enterprise partner integrations.'}
+                  ? '• Réalisations factuelles extraites de votre propre parcours.'
+                  : '• Factual accomplishments extracted from your own track record.'}
               </p>
             </div>
           </div>
@@ -869,7 +868,7 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
               {isFr ? 'Formation' : 'Education'}
             </div>
             <div className="text-[10px] text-slate-700 mt-0.5">
-              Master Management & Technologies Digitales
+              {isFr ? 'Diplôme · Établissement · Année' : 'Degree · Institution · Year'}
             </div>
           </div>
         </div>
@@ -890,148 +889,77 @@ export function CvStudioDemo({ lang }: { lang: Lang }) {
 
 export function InterviewCoachDemo({ lang }: { lang: Lang }) {
   const isFr = lang === 'fr';
-  const [sampleIdx, setSampleIdx] = useState(0);
+  const [rubricIdx, setRubricIdx] = useState(0);
 
-  const samples = [
+  const rubrics = [
     {
-      label: isFr ? 'Question comportementale' : 'Behavioral Question',
+      label: isFr ? 'Méthode STAR' : 'STAR Method',
       question: isFr
-        ? '« Parlez-moi d’un lancement international complexe dont vous avez piloté la coordination. »'
-        : '“Tell me about a complex international launch you coordinated end-to-end.”',
-      answer: isFr
-        ? '« Sur notre déploiement DACH, j’ai aligné produit, conformité et ventes autour d’un jalon de 10 semaines, réduisant les délais d’intégration de 30 %. »'
-        : '“During our DACH expansion, I aligned product, compliance, and sales around a 10-week plan, cutting onboarding time by 30%.”',
-      score: 86,
+        ? 'Comment l’IA évalue vos vraies réponses d’entretien :'
+        : 'How the AI evaluates your real interview answers:',
+      criteria: isFr
+        ? 'Situation · Tâche · Action concrète · Résultat mesurable — adapté au poste ciblé et à votre propre parcours.'
+        : 'Situation · Task · Concrete Action · Measurable Result — tailored to the target role and your own background.',
       tip: isFr
-        ? 'Structure STAR solide. Précisez votre arbitrage face au principal risque réglementaire pour atteindre 95/100.'
-        : 'Strong STAR structure. Add one detail on how you resolved the main compliance trade-off to reach 95/100.',
+        ? 'Ouvrez le module Préparation Entretiens pour répondre à des questions générées sur une offre réelle.'
+        : 'Open Interview Prep to practice with questions generated from a real target job listing.',
     },
     {
-      label: isFr ? 'Question stratégique' : 'Strategy Question',
+      label: isFr ? 'Entretien vocal & texte' : 'Voice & Text Coaching',
       question: isFr
-        ? '« Comment priorisez-vous votre feuille de route face à deux demandes clients majeures ? »'
-        : '“How do you prioritize your roadmap when two enterprise clients have conflicting needs?”',
-      answer: isFr
-        ? '« J’évalue l’impact revenu récurrent, la réutilisabilité plateforme et le coût d’opportunité avant de proposer un phasage transparent. »'
-        : '“I score recurring revenue impact, platform reusability, and engineering opportunity cost before proposing a transparent phased plan.”',
-      score: 90,
+        ? 'Entraînement interactif sur vos candidatures actives :'
+        : 'Interactive rehearsal on your active applications:',
+      criteria: isFr
+        ? 'Analyse de la clarté, de la précision métier, de la concision et des points de vigilance spécifiques à l’employeur.'
+        : 'Evaluates clarity, domain precision, conciseness, and employer-specific talking points.',
       tip: isFr
-        ? 'Excellente clarté décisionnelle. Ajoutez un indicateur chiffré de résultat post-lancement.'
-        : 'Clear decision framework. Include one measurable post-launch metric to reinforce authority.',
+        ? 'Aucune réponse fictive : votre score réel est calculé uniquement à partir de vos propres sessions enregistrées.'
+        : 'Zero fabricated answers: your real readiness score is computed exclusively from your own recorded sessions.',
     },
   ];
 
-  const activeSample = samples[sampleIdx];
+  const activeRubric = rubrics[rubricIdx];
 
   return (
     <div className="bg-white rounded-3xl border border-jf-border shadow-[0_24px_60px_-24px_rgba(6,19,47,0.16)] p-6 sm:p-8 space-y-6">
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <span className="text-xs font-bold tracking-wide uppercase text-jf-blue">
-          {isFr ? 'Progression (exemple illustratif)' : 'Progress (illustrative example)'}
+          {isFr ? 'Grille d’évaluation IA réelle' : 'Real AI Evaluation Rubric'}
         </span>
-        <span className="text-xs font-semibold text-jf-navy font-mono tabular-nums">
-          {isFr ? '4 entretiens blancs' : '4 mock sessions'}
+        <span className="text-xs font-semibold text-jf-navy font-mono">
+          {isFr ? 'STAR · Clarté · Impact' : 'STAR · Clarity · Impact'}
         </span>
       </div>
 
-      {/* Progression Line Chart SVG (Inspired by Reference #5, strictly Deep Navy + Sky Blue) */}
-      <div className="rounded-2xl bg-jf-ice border border-jf-border p-4">
-        <svg
-          viewBox="0 0 380 140"
-          className="w-full h-36 overflow-visible"
-          role="img"
-          aria-label="Interview preparation score progression chart"
-        >
-          {/* Ready Zone Band */}
-          <rect x="10" y="10" width="360" height="44" rx="10" fill="#D5EBFA" fillOpacity="0.65" />
-          <line
-            x1="10"
-            y1="54"
-            x2="370"
-            y2="54"
-            stroke="#287BC7"
-            strokeDasharray="4 4"
-            strokeWidth="1.5"
-          />
-          <text
-            x="362"
-            y="68"
-            textAnchor="end"
-            fill="#287BC7"
-            fontSize="10"
-            fontWeight="700"
-          >
-            {isFr ? 'PRÊT' : 'READY'}
-          </text>
-
-          {/* Subtle Area Fill under curve */}
-          <defs>
-            <linearGradient id="jfCoachArea" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stopColor="#287BC7" stopOpacity="0.24" />
-              <stop offset="100%" stopColor="#A9D8F5" stopOpacity="0.02" />
-            </linearGradient>
-          </defs>
-          <path
-            d="M 42 108 L 136 86 L 234 74 L 336 36 L 336 126 L 42 126 Z"
-            fill="url(#jfCoachArea)"
-          />
-
-          {/* Progression Polyline */}
-          <motion.path
-            d="M 42 108 L 136 86 L 234 74 L 336 36"
-            fill="none"
-            stroke="#06132F"
-            strokeWidth="2.5"
-            strokeLinecap="round"
-            initial={{ pathLength: 0 }}
-            whileInView={{ pathLength: 1 }}
-            viewport={{ once: true, amount: 0.4 }}
-            transition={{ duration: 0.85, ease: [0.16, 1, 0.3, 1] }}
-          />
-
-          {/* Data Nodes */}
-          {[
-            { x: 42, y: 108, val: '42', highlight: false },
-            { x: 136, y: 86, val: '58', highlight: false },
-            { x: 234, y: 74, val: '71', highlight: false },
-            { x: 336, y: 36, val: String(activeSample.score), highlight: true },
-          ].map((pt) => (
-            <g key={pt.x}>
-              <circle
-                cx={pt.x}
-                cy={pt.y}
-                r={pt.highlight ? 7 : 5}
-                fill={pt.highlight ? '#287BC7' : '#FFFFFF'}
-                stroke={pt.highlight ? '#A9D8F5' : '#06132F'}
-                strokeWidth={pt.highlight ? 3 : 2}
-              />
-              <text
-                x={pt.x}
-                y={pt.highlight ? pt.y - 14 : pt.y + 18}
-                textAnchor="middle"
-                fill={pt.highlight ? '#06132F' : '#556E91'}
-                fontSize={pt.highlight ? '13' : '11'}
-                fontWeight="700"
-                className="font-mono"
-              >
-                {pt.val}
-              </text>
-            </g>
-          ))}
-        </svg>
+      {/* Rubric Pillars */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+        {[
+          { code: 'S', title: isFr ? 'Situation' : 'Situation', desc: isFr ? 'Contexte précis' : 'Clear context' },
+          { code: 'T', title: isFr ? 'Tâche' : 'Task', desc: isFr ? 'Objectif visé' : 'Target goal' },
+          { code: 'A', title: isFr ? 'Action' : 'Action', desc: isFr ? 'Décisions clés' : 'Key decisions' },
+          { code: 'R', title: isFr ? 'Résultat' : 'Result', desc: isFr ? 'Impact factuel' : 'Factual impact' },
+        ].map((step) => (
+          <div key={step.code} className="rounded-2xl bg-jf-ice border border-jf-border p-3 text-center space-y-1">
+            <div className="w-7 h-7 mx-auto rounded-lg bg-jf-navy text-jf-sky font-mono text-xs font-bold flex items-center justify-center">
+              {step.code}
+            </div>
+            <div className="text-xs font-semibold text-jf-navy">{step.title}</div>
+            <div className="text-[11px] text-slate-500">{step.desc}</div>
+          </div>
+        ))}
       </div>
 
-      {/* Interactive Question & AI Feedback Switcher */}
+      {/* Interactive Mode Switcher */}
       <div className="space-y-3 pt-1">
         <div className="flex items-center gap-1.5">
-          {samples.map((s, idx) => (
+          {rubrics.map((s, idx) => (
             <button
               key={s.label}
               type="button"
-              onClick={() => setSampleIdx(idx)}
+              onClick={() => setRubricIdx(idx)}
               className={`px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
-                sampleIdx === idx
+                rubricIdx === idx
                   ? 'bg-jf-navy text-white border-jf-navy'
                   : 'bg-jf-ice text-jf-dark border-jf-border hover:bg-jf-soft'
               }`}
@@ -1043,31 +971,28 @@ export function InterviewCoachDemo({ lang }: { lang: Lang }) {
 
         <div className="p-4 rounded-2xl bg-jf-ice/80 border border-jf-border space-y-2.5 text-xs">
           <div className="font-semibold text-jf-navy leading-relaxed">
-            {activeSample.question}
+            {activeRubric.question}
           </div>
-          <p className="text-slate-600 italic leading-relaxed">{activeSample.answer}</p>
-          <div className="pt-2 border-t border-jf-border flex items-start justify-between gap-3">
+          <p className="text-slate-600 leading-relaxed">{activeRubric.criteria}</p>
+          <div className="pt-2 border-t border-jf-border">
             <p className="text-jf-dark leading-relaxed">
               <strong className="text-jf-blue">
-                {isFr ? 'Conseil IA : ' : 'AI Coaching: '}
+                {isFr ? 'Fonctionnement réel : ' : 'How it works: '}
               </strong>
-              {activeSample.tip}
+              {activeRubric.tip}
             </p>
-            <span className="font-mono font-bold text-jf-navy tabular-nums shrink-0">
-              {activeSample.score}/100
-            </span>
           </div>
         </div>
       </div>
 
       {/* Bottom Summary Strip */}
       <div className="flex items-center justify-between pt-2 border-t border-jf-border text-xs">
-        <span className="font-mono font-semibold text-jf-navy tabular-nums">
-          {isFr ? `Session 4 : ${activeSample.score}/100` : `Session 4: ${activeSample.score}/100`}
+        <span className="font-mono font-semibold text-jf-navy">
+          {isFr ? 'Score basé sur vos sessions' : 'Score from your sessions'}
         </span>
         <span className="inline-flex items-center gap-1.5 font-semibold text-jf-blue">
           <CheckCircle2 className="w-4 h-4" />
-          <span>{isFr ? 'Prêt pour le vrai entretien' : 'Ready for the real interview'}</span>
+          <span>{isFr ? 'Zéro donnée simulée' : 'Zero simulated data'}</span>
         </span>
       </div>
     </div>

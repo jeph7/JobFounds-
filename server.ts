@@ -11,10 +11,13 @@ import {
   attachFirebaseAuth,
   clampStr,
   createRateLimiter,
+  extractDomainFromUrl,
   isSafePublicHttpUrl,
+  registerAppTokenVerifier,
   requireFirebaseAuth,
   sanitizeHttpUrl,
 } from './serverSecurity.ts';
+import { createAuthRouter, verifyAppSessionToken } from './serverAuthEngine.ts';
 import { fetchAggregatedLiveJobFeeds } from './serverJobFeeds.ts';
 import {
   closeEngineDb,
@@ -24,12 +27,17 @@ import {
   getEngineStorageInfo,
   isSourceEnabled,
   listCompanies,
+  listEngineDbBackups,
   logAiUsage,
   recordSourceCall,
   upsertCompany,
 } from './serverEngineDb.ts';
 import { createIntelligenceRouter } from './serverIntelligenceRoutes.ts';
-import { getWorkerMode, startBackgroundWorkerLoop } from './serverWorkerEngine.ts';
+import {
+  getWorkerMode,
+  startBackgroundWorkerLoop,
+  verifyCorporateDomainMx,
+} from './serverWorkerEngine.ts';
 import { attachLiveVoiceBridge } from './serverLiveVoice.ts';
 import {
   resolveLocationsBatch,
@@ -194,10 +202,22 @@ const CV_PARSE_SCHEMA = {
 
 async function startServer() {
   const app = express();
-  app.set('trust proxy', true);
+  app.set('trust proxy', 1);
 
-  // Isolate 16MB payload limit strictly to CV file uploads; keep all other routes capped at 256KB
+  // Production HTTPS & security headers (Hostinger reverse proxy safe)
+  app.use((req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    res.setHeader('Permissions-Policy', 'camera=(), geolocation=(self), microphone=(self)');
+    if (process.env.NODE_ENV === 'production' && (req.secure || req.headers['x-forwarded-proto'] === 'https')) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
+    next();
+  });
+
+  // Isolate 16MB payload limit strictly to CV uploads and application document attachments; keep all other routes capped at 256KB
   app.use('/api/cv/import-file', express.json({ limit: '16mb' }));
+  app.use('/api/applications/submit', express.json({ limit: '16mb' }));
   app.use(express.json({ limit: '256kb' }));
 
   // Verify optional Firebase ID tokens on all /api/* requests
@@ -229,14 +249,19 @@ async function startServer() {
   // and enqueue immediate career scans so live jobs populate automatically without manual CLI setup.
   if (listCompanies({ limit: 1 }).length === 0) {
     const starterTargets = [
-      { officialName: 'Stripe', officialWebsite: 'https://stripe.com', careersUrl: 'https://boards.greenhouse.io/stripe', country: 'Ireland / United States', location: 'Dublin · San Francisco · Paris · Remote', sector: 'FinTech & Payments Infrastructure', estimatedSize: '5000+' },
-      { officialName: 'Datadog', officialWebsite: 'https://www.datadoghq.com', careersUrl: 'https://boards.greenhouse.io/datadog', country: 'France / United States', location: 'Paris · New York · Madrid · Remote', sector: 'Cloud Observability & Security SaaS', estimatedSize: '5000+' },
-      { officialName: 'Celonis', officialWebsite: 'https://www.celonis.com', careersUrl: 'https://boards.greenhouse.io/celonis', country: 'Germany', location: 'Munich · Madrid · London · New York', sector: 'Enterprise AI & Process Intelligence', estimatedSize: '1000-5000' },
-      { officialName: 'Adyen', officialWebsite: 'https://www.adyen.com', careersUrl: 'https://boards.greenhouse.io/adyen', country: 'Netherlands', location: 'Amsterdam · Paris · London · Singapore', sector: 'FinTech & Global Payments', estimatedSize: '1000-5000' },
-      { officialName: 'Algolia', officialWebsite: 'https://www.algolia.com', careersUrl: 'https://boards.greenhouse.io/algolia', country: 'France / United States', location: 'Paris · London · San Francisco · Remote', sector: 'AI Search & Developer SaaS', estimatedSize: '500-1000' },
-      { officialName: 'Alan', officialWebsite: 'https://alan.com', careersUrl: 'https://jobs.ashbyhq.com/alan', country: 'France', location: 'Paris · Brussels · Madrid · Remote', sector: 'InsurTech & Digital Health', estimatedSize: '500-1000' },
+      { officialName: 'Stripe', officialWebsite: 'https://stripe.com', careersUrl: 'https://boards.greenhouse.io/stripe', country: 'Ireland / United States / Global', location: 'Dublin · San Francisco · Paris · Singapore · Remote', sector: 'FinTech & Payments Infrastructure', estimatedSize: '5000+' },
+      { officialName: 'Datadog', officialWebsite: 'https://www.datadoghq.com', careersUrl: 'https://boards.greenhouse.io/datadog', country: 'France / United States / Japan / Australia', location: 'Paris · New York · Tokyo · Sydney · Madrid', sector: 'Cloud Observability & Security SaaS', estimatedSize: '5000+' },
+      { officialName: 'Celonis', officialWebsite: 'https://www.celonis.com', careersUrl: 'https://boards.greenhouse.io/celonis', country: 'Germany / United States / Japan', location: 'Munich · Madrid · London · New York · Tokyo', sector: 'Enterprise AI & Process Intelligence', estimatedSize: '1000-5000' },
+      { officialName: 'Adyen', officialWebsite: 'https://www.adyen.com', careersUrl: 'https://boards.greenhouse.io/adyen', country: 'Netherlands / Brazil / Singapore / Australia', location: 'Amsterdam · São Paulo · Singapore · Sydney · Paris', sector: 'FinTech & Global Payments', estimatedSize: '1000-5000' },
+      { officialName: 'Algolia', officialWebsite: 'https://www.algolia.com', careersUrl: 'https://boards.greenhouse.io/algolia', country: 'France / United States / United Kingdom', location: 'Paris · London · San Francisco · Remote', sector: 'AI Search & Developer SaaS', estimatedSize: '500-1000' },
+      { officialName: 'Alan', officialWebsite: 'https://alan.com', careersUrl: 'https://jobs.ashbyhq.com/alan', country: 'France / Belgium / Spain / Canada', location: 'Paris · Brussels · Madrid · Montreal · Remote', sector: 'InsurTech & Digital Health', estimatedSize: '500-1000' },
       { officialName: 'Linear', officialWebsite: 'https://linear.app', careersUrl: 'https://jobs.ashbyhq.com/linear', country: 'United States / Europe', location: 'Remote (Europe & North America)', sector: 'Developer Tools & Productivity SaaS', estimatedSize: '50-200' },
-      { officialName: 'Spotify', officialWebsite: 'https://www.spotify.com', careersUrl: 'https://jobs.lever.co/spotify', country: 'Sweden / Global', location: 'Stockholm · London · New York · Remote', sector: 'Audio Streaming & Consumer Tech', estimatedSize: '5000+' },
+      { officialName: 'Nubank', officialWebsite: 'https://nubank.com.br', careersUrl: 'https://boards.greenhouse.io/nubank', country: 'Brazil / Mexico / Colombia', location: 'São Paulo · Mexico City · Bogotá', sector: 'Digital Banking & FinTech (Latin America)', estimatedSize: '5000+' },
+      { officialName: 'Visa', officialWebsite: 'https://www.visa.com', careersUrl: 'https://jobs.smartrecruiters.com/Visa', country: 'Global (Africa, Caribbean, LatAm, Europe, Asia, Oceania, North America)', location: 'Miami · Lagos · Nairobi · Dubai · Singapore · Sydney · London · São Paulo', sector: 'Global Financial Payments Network', estimatedSize: '10000+' },
+      { officialName: 'Canva', officialWebsite: 'https://www.canva.com', careersUrl: 'https://jobs.smartrecruiters.com/Canva', country: 'Australia / Oceania / Asia / Europe / United States', location: 'Sydney · Melbourne · Manila · London · Austin', sector: 'Visual Communication & Design SaaS', estimatedSize: '1000-5000' },
+      { officialName: 'Wise', officialWebsite: 'https://wise.com', careersUrl: 'https://boards.greenhouse.io/wise', country: 'United Kingdom / Singapore / Brazil / Australia / United States', location: 'London · Singapore · São Paulo · Sydney · Tallinn', sector: 'Cross-Border Payments & FinTech', estimatedSize: '5000+' },
+      { officialName: 'GitLab', officialWebsite: 'https://about.gitlab.com', careersUrl: 'https://boards.greenhouse.io/gitlab', country: 'Global / Worldwide Remote', location: 'Worldwide Remote (Europe, Americas, Africa, APAC)', sector: 'DevSecOps & Cloud Platform', estimatedSize: '1000-5000' },
+      { officialName: 'Deel', officialWebsite: 'https://www.deel.com', careersUrl: 'https://jobs.ashbyhq.com/deel', country: 'Global / Worldwide Remote (Africa, Caribbean, LatAm, Europe, Asia, Oceania)', location: 'Worldwide Remote', sector: 'Global HR, Payroll & Compliance SaaS', estimatedSize: '1000-5000' },
     ];
     const monitorIntervalMinutes = Number(process.env.ENGINE_DEFAULT_MONITOR_MINUTES) || 720;
     for (const target of starterTargets) {
@@ -257,6 +282,10 @@ async function startServer() {
   }
 
   startBackgroundWorkerLoop();
+
+  // Register JOBFOUNDS email/password session token verifier & mount /api/auth/* endpoints
+  registerAppTokenVerifier(verifyAppSessionToken);
+  app.use('/api', createAuthRouter());
 
   // Mount Global Company Intelligence, Career Monitor, HR Verification, Matching, Notifications & Admin routes
   app.use('/api', createIntelligenceRouter());
@@ -317,8 +346,11 @@ async function startServer() {
         aiWithinBudget: budget.withinBudget,
         geminiConfigured: Boolean(process.env.GEMINI_API_KEY?.trim()),
         emailConfigured: Boolean(
-          process.env.RESEND_API_KEY?.trim() && process.env.NOTIFICATION_FROM_EMAIL?.trim()
+          process.env.RESEND_API_KEY?.trim() &&
+            (process.env.RESEND_FROM_EMAIL?.trim() || process.env.NOTIFICATION_FROM_EMAIL?.trim())
         ),
+        backupsCount: listEngineDbBackups().length,
+        nodeVersion: process.version,
         memoryRssMb: rssMb,
       },
     });
@@ -437,9 +469,9 @@ Return ONLY a valid JSON object in ${outputLang}:
       const outputLang = getOutputLanguage(lang);
 
       const prompt = `You are the JOBFOUNDS Global Job Search Intelligence Engine.
-Search the web right now for real, current, verifiable job openings matching these user criteria:
-- Role / Keywords: ${query || 'Software Engineering, Product, Finance, or Data roles'}
-- Country: ${country || 'Global (major international markets)'}
+Search the web right now for real, current, active, verifiable job openings matching these user criteria across ALL regions of the world (Europe, North America, Latin America, Caribbean, Africa, Asia, Oceania):
+- Role / Keywords: ${query || 'Software Engineering, Product, Finance, Operations, Healthcare, or Data roles'}
+- Target Country / Continent: ${country || 'Worldwide (Europe, North America, Latin America, Caribbean, Africa, Asia, Oceania)'}
 - City: ${city || 'Any'}
 - Work Mode: ${workMode || 'Any (Remote / Hybrid / On-site)'}
 - Contract Type: ${contractType || 'Any (Full-time / Part-time / Contract / Internship / Freelance)'}
@@ -449,7 +481,7 @@ Search the web right now for real, current, verifiable job openings matching the
 - Languages: ${languages || 'Any'}
 - Minimum Salary: ${minSalary || 'Any'}
 - Company: ${company || 'Any'}
-- Recency: ${datePosted || 'Recent'}
+- Recency: ${datePosted || 'Recent (active openings only)'}
 
 Return ONLY a valid JSON object (no markdown commentary outside the JSON):
 {
@@ -459,8 +491,8 @@ Return ONLY a valid JSON object (no markdown commentary outside the JSON):
       "id": "unique-slug",
       "title": "Exact job title",
       "company": "Real company name",
-      "country": "Country name",
-      "city": "City name",
+      "country": "Exact country name matching the requested geography",
+      "city": "City name or Remote",
       "workMode": "Remote" | "Hybrid" | "On-site",
       "contractType": "Full-time" | "Part-time" | "Contract" | "Internship" | "Freelance",
       "experienceLevel": "Junior" | "Mid-level" | "Senior" | "Lead / Executive",
@@ -470,8 +502,9 @@ Return ONLY a valid JSON object (no markdown commentary outside the JSON):
       "languages": ["French", "English"],
       "skills": ["Skill 1", "Skill 2", "Skill 3", "Skill 4"],
       "publishedDate": "YYYY-MM-DD",
+      "applicationDeadline": "YYYY-MM-DD or empty string",
       "sourceName": "Exact job board or company careers site name",
-      "sourceUrl": "Real verifiable URL from search results",
+      "sourceUrl": "Real verifiable HTTPS URL from search results",
       "verificationStatus": "Verified" | "Partially Verified" | "Unverified" | "Suspicious" | "Expired",
       "verificationSummary": "One factual sentence explaining why this status was assigned in ${outputLang}",
       "description": "Concise 2-3 sentence summary of actual responsibilities and requirements in ${outputLang}",
@@ -482,9 +515,11 @@ Return ONLY a valid JSON object (no markdown commentary outside the JSON):
 }
 
 STRICT RULES:
-1. Return between 5 and 8 real job opportunities grounded in your Google Search results.
-2. Never guarantee authenticity if evidence is incomplete — use "Partially Verified" or "Unverified" honestly when official corporate career pages cannot be directly corroborated.
-3. Write all summaries, descriptions, and verificationSummary in ${outputLang}.`;
+1. Return between 5 and 10 real, currently active job opportunities grounded in your Google Search results.
+2. STRICT GEOGRAPHIC HONESTY: If the user specifies a country or region (e.g. Haïti, Sénégal, Brésil, Maroc, Canada, Japon, Australie, Caraïbes, Afrique, Amérique latine), prioritize real active listings located in or explicitly open to that exact country/region. Never restrict results artificially to Europe/US when another country was requested.
+3. NEVER return expired listings, fake companies, or jobs without a real verifiable HTTPS sourceUrl.
+4. Never guarantee authenticity if evidence is incomplete — use "Partially Verified" or "Unverified" honestly when official corporate career pages cannot be directly corroborated.
+5. Write all summaries, descriptions, and verificationSummary in ${outputLang}.`;
 
       const response = await ai.models.generateContent({
         model: MODEL,
@@ -496,10 +531,25 @@ STRICT RULES:
 
       const parsed = parseJsonFromText<{ searchSummary: string; jobs: any[] }>(response.text);
       const sources = extractGroundingSources(response);
+      const seen = new Set<string>();
+      const validJobs = (Array.isArray(parsed.jobs) ? parsed.jobs : []).filter((j: any) => {
+        const cleanUrl = sanitizeHttpUrl(j?.sourceUrl);
+        if (!cleanUrl || !j?.title || !j?.company) return false;
+        if (String(j.verificationStatus || '').toLowerCase() === 'expired') return false;
+        if (j.applicationDeadline) {
+          const dl = Date.parse(String(j.applicationDeadline));
+          if (!Number.isNaN(dl) && dl < Date.now() - 86_400_000) return false;
+        }
+        const key = `${String(j.company).toLowerCase().trim()}::${String(j.title).toLowerCase().trim()}::${String(j.city || '').toLowerCase().trim()}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        j.sourceUrl = cleanUrl;
+        return true;
+      });
 
       res.json({
         searchSummary: parsed.searchSummary || '',
-        jobs: Array.isArray(parsed.jobs) ? parsed.jobs : [],
+        jobs: validJobs,
         groundingSources: sources,
       });
     } catch (err) {
@@ -945,7 +995,7 @@ ${jobDescription}`,
     }
   });
 
-  // MODULE 6 — SMART JOB MATCHING (Explainable 8-dimension analysis)
+  // MODULE 6 — SMART JOB MATCHING (Explainable 9-dimension analysis aligned with Central Engine)
   app.post('/api/match/evaluate', async (req, res) => {
     try {
       const { profile, job, lang = 'fr' } = req.body ?? {};
@@ -959,15 +1009,16 @@ ${jobDescription}`,
 
       const response = await ai.models.generateContent({
         model: MODEL,
-        contents: `Evaluate explainable compatibility between this candidate profile and job across ALL 8 dimensions:
+        contents: `Evaluate explainable compatibility between this candidate profile and job across ALL 9 mandatory dimensions (return EXACTLY 9 items in "dimensions" in this exact order):
 1. Compétences (Skills)
-2. Expérience (Experience)
-3. Diplômes (Education/Degrees)
+2. Expérience professionnelle (Professional Experience)
+3. Formation et diplômes (Education & Degrees)
 4. Langues (Languages)
-5. Préférences géographiques (Geographic preferences)
-6. Prétentions salariales (Salary expectations)
-7. Disponibilités (Availability)
-8. Conditions de travail (Work mode & contract conditions)
+5. Localisation et mobilité (Location, Mobility & Work Mode)
+6. Autorisation de travail et visa (Work Authorization & Visa)
+7. Disponibilité (Availability)
+8. Prétentions salariales (Salary Expectations)
+9. Fiabilité de la source de l'offre (Offer Source Reliability & Verification Status)
 
 Respond entirely in ${outputLang}. Remind clearly that this score is an explainable decision-support insight, never an automated hiring decision.
 
@@ -1004,14 +1055,72 @@ ${JSON.stringify(job)}`,
         },
       });
 
-      res.json(parseJsonFromText(response.text));
+      const parsed = parseJsonFromText<any>(response.text);
+      const defaultNineNames =
+        lang === 'fr'
+          ? [
+              'Compétences',
+              'Expérience professionnelle',
+              'Formation et diplômes',
+              'Langues',
+              'Localisation et mobilité',
+              'Autorisation de travail et visa',
+              'Disponibilité',
+              'Prétentions salariales',
+              'Fiabilité de la source de l’offre',
+            ]
+          : [
+              'Skills',
+              'Professional Experience',
+              'Education & Degrees',
+              'Languages',
+              'Location & Mobility',
+              'Work Authorization & Visa',
+              'Availability',
+              'Salary Expectations',
+              'Offer Source Reliability',
+            ];
+      const rawDims = Array.isArray(parsed?.dimensions) ? parsed.dimensions : [];
+      const sourceRelFallback =
+        job.verificationStatus === 'Verified'
+          ? 94
+          : job.verificationStatus === 'Partially Verified'
+            ? 74
+            : 45;
+      const normalizedDims = defaultNineNames.map((label, idx) => {
+        const existing = rawDims[idx];
+        if (existing && typeof existing.score === 'number') {
+          return {
+            name: String(existing.name || label),
+            score: Math.max(0, Math.min(100, Math.round(existing.score))),
+            explanation: String(existing.explanation || ''),
+          };
+        }
+        return {
+          name: label,
+          score: idx === 8 ? sourceRelFallback : 65,
+          explanation:
+            idx === 8
+              ? lang === 'fr'
+                ? `Statut de vérification de la source : ${job.verificationStatus || 'Non vérifié'} (${job.sourceName || 'Source externe'}).`
+                : `Source verification status: ${job.verificationStatus || 'Unverified'} (${job.sourceName || 'External source'}).`
+              : lang === 'fr'
+                ? 'Information partiellement renseignée dans le profil ou l’annonce.'
+                : 'Partially specified in candidate profile or job listing.',
+        };
+      });
+
+      res.json({
+        ...parsed,
+        dimensions: normalizedDims,
+      });
     } catch (err) {
       const { status, message } = formatApiError(err);
       res.status(status).json({ error: message });
     }
   });
 
-  // RECRUITER & HR DECISION-MAKER DIRECTORY FINDER (Google Search Grounding)
+  // RECRUITER & HR DECISION-MAKER DIRECTORY FINDER (Google Search Grounding + Live DNS MX Verification)
   app.post('/api/recruiters/find', async (req, res) => {
     try {
       const { company = '', country = '', department = '', lang = 'fr' } = req.body ?? {};
@@ -1024,27 +1133,32 @@ ${JSON.stringify(job)}`,
       const outputLang = getOutputLanguage(lang);
 
       const prompt = `You are the JOBFOUNDS Verified Recruiter & HR Decision-Maker Finder.
-Use Google Search to identify real, publicly visible HR leaders, Talent Acquisition contacts, hiring departments, official career portals, and verified corporate email domain conventions for:
+Use Google Search to identify ONLY real, publicly verifiable HR leaders, Talent Acquisition contacts, hiring departments, official career portals, and officially published corporate recruiting channels for:
 - Company: ${company}
 - Country / Region: ${country || 'Global / HQ'}
 - Department / Role Focus: ${department || 'Talent Acquisition & Hiring Leadership'}
 
-PRIVACY & ACCURACY RULE: Never invent personal private emails or fabricated names. Only report publicly announced executives/HR leaders, official careers/recruiting channels, and verified corporate domain formats.
+ZERO-FABRICATION RULE:
+- NEVER invent a person's name, personal email address, or profile URL.
+- If no named public HR contact is verifiably indexed, return an empty contacts array or ONLY the official careers portal/desk found verbatim in search results.
+- Only include a corporateEmail if it is an officially published generic recruiting email found verbatim on the company's official domain (e.g. careers@company.com).
 
 Return ONLY a valid JSON object in ${outputLang}:
 {
-  "companyOverview": "Short factual summary of the company and hiring structure in ${outputLang}",
-  "officialDomain": "e.g. company.com",
-  "careersPortalUrl": "Official careers page URL",
+  "companyOverview": "Short factual summary of the real company and its hiring structure in ${outputLang}",
+  "officialDomain": "e.g. company.com (or empty string if unverified)",
+  "careersPortalUrl": "Official HTTPS careers page URL from search results (or empty string)",
   "emailDomainStatus": "Verified" | "Partially Verified" | "Unverified",
   "contacts": [
     {
       "nameOrTitle": "Publicly verified HR leader name or official hiring desk title",
-      "role": "Exact role (e.g. VP People / EMEA Talent Acquisition Lead)",
+      "role": "Exact role (e.g. VP People / Talent Acquisition Lead)",
       "location": "City, Country",
-      "channel": "Official Careers Portal / LinkedIn Public Profile / Corporate Press-HR Desk",
-      "publicUrl": "Verifiable public URL from search results",
-      "verificationNote": "Why this contact/channel is verified or partial in ${outputLang}",
+      "channel": "Official Careers Portal / LinkedIn Public Profile / Official Recruiting Email",
+      "corporateEmail": "Officially published generic recruiting email on the official domain only, else empty string",
+      "publicUrl": "Real verifiable HTTPS URL from search results (never fabricated)",
+      "confidenceLevel": "confirmed" | "probable" | "unverified",
+      "verificationNote": "Transparent note stating the public source verified in ${outputLang}",
       "outreachTip": "Specific advice for approaching this stakeholder in ${outputLang}"
     }
   ]
@@ -1059,8 +1173,83 @@ Return ONLY a valid JSON object in ${outputLang}:
       const parsed = parseJsonFromText<any>(response.text);
       const sources = extractGroundingSources(response);
 
+      const safeCareersUrl = sanitizeHttpUrl(parsed?.careersPortalUrl);
+      const rawDomain = clampStr(parsed?.officialDomain, 160)
+        .replace(/^https?:\/\//i, '')
+        .replace(/^www\./i, '')
+        .split('/')[0]
+        .trim()
+        .toLowerCase();
+      const officialDomain =
+        rawDomain || (safeCareersUrl ? extractDomainFromUrl(safeCareersUrl) : '');
+
+      // Live DNS MX check on the official corporate domain
+      const mxCheck = officialDomain
+        ? await verifyCorporateDomainMx(officialDomain)
+        : { verified: false, mxHosts: [] as string[] };
+
+      const verifiedEmailDomainStatus: 'Verified' | 'Partially Verified' | 'Unverified' =
+        officialDomain && mxCheck.verified && (safeCareersUrl || sources.length > 0)
+          ? 'Verified'
+          : officialDomain && (mxCheck.verified || safeCareersUrl)
+            ? 'Partially Verified'
+            : 'Unverified';
+
+      const sanitizedContacts = (Array.isArray(parsed?.contacts) ? parsed.contacts : [])
+        .map((c: any) => {
+          const publicUrl = sanitizeHttpUrl(c?.publicUrl);
+          const rawEmail = String(c?.corporateEmail || '').trim().toLowerCase();
+          const safeCorporateEmail =
+            rawEmail &&
+            mxCheck.verified &&
+            officialDomain &&
+            rawEmail.endsWith(`@${officialDomain}`) &&
+            /^(careers|jobs|recruiting|recruitment|recrutement|talent|hr|rh|people|hiring|apply|contact)@/i.test(
+              rawEmail
+            )
+              ? rawEmail
+              : '';
+
+          let confidenceLevel: 'confirmed' | 'probable' | 'unverified' =
+            c?.confidenceLevel === 'confirmed' || c?.confidenceLevel === 'probable'
+              ? c.confidenceLevel
+              : 'unverified';
+          if (confidenceLevel === 'confirmed' && !publicUrl && !safeCorporateEmail) {
+            confidenceLevel = 'unverified';
+          }
+
+          return {
+            nameOrTitle: clampStr(c?.nameOrTitle, 140),
+            role: clampStr(c?.role, 140),
+            location: clampStr(c?.location, 120),
+            channel: clampStr(c?.channel, 120) || 'Canal public',
+            corporateEmail: safeCorporateEmail || undefined,
+            publicUrl,
+            confidenceLevel,
+            domainMxVerified: mxCheck.verified,
+            verificationNote: clampStr(
+              `${c?.verificationNote || ''}${
+                mxCheck.verified
+                  ? ` [DNS MX vérifié : ${mxCheck.mxHosts[0] || officialDomain}]`
+                  : officialDomain
+                    ? ' [DNS MX non confirmé]'
+                    : ''
+              }`,
+              400
+            ),
+            outreachTip: clampStr(c?.outreachTip, 300),
+          };
+        })
+        .filter((c: any) => Boolean(c.nameOrTitle && c.role));
+
       res.json({
-        ...parsed,
+        companyOverview: clampStr(parsed?.companyOverview, 800),
+        officialDomain,
+        careersPortalUrl: safeCareersUrl,
+        emailDomainStatus: verifiedEmailDomainStatus,
+        domainMxVerified: mxCheck.verified,
+        mxHosts: mxCheck.mxHosts.slice(0, 3),
+        contacts: sanitizedContacts,
         groundingSources: sources,
       });
     } catch (err) {

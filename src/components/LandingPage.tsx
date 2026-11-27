@@ -36,6 +36,7 @@ interface LandingPageProps {
   onNavigate: (tab: WorkspaceTab, careerSubTab?: CareerSubTab) => void;
   onSelectPersona: (role: AccountRole, targetTab: WorkspaceTab) => void;
   onSignIn: () => void;
+  onStartRegister: () => void;
 }
 
 type InfoModalKey = 'about' | 'help' | 'terms' | 'contact' | null;
@@ -55,6 +56,7 @@ export function LandingPage({
   signedInEmail,
   onNavigate,
   onSignIn,
+  onStartRegister,
 }: LandingPageProps) {
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [infoModal, setInfoModal] = useState<InfoModalKey>(null);
@@ -506,8 +508,8 @@ export function LandingPage({
       num: '03',
       title: isFr ? 'Intelligence artificielle' : 'Targeted AI Coaching',
       desc: isFr
-        ? 'Accompagnement personnalisé sur le CV, l’analyse ATS, la compatibilité en 8 critères et l’entraînement aux entretiens.'
-        : 'Personalized guidance across resume tailoring, ATS analysis, 8-dimension matching, and interview coaching.',
+        ? 'Accompagnement personnalisé sur le CV, l’analyse ATS, la compatibilité en 9 critères et l’entraînement aux entretiens.'
+        : 'Personalized guidance across resume tailoring, ATS analysis, 9-dimension matching, and interview coaching.',
     },
     {
       num: '04',
@@ -658,7 +660,7 @@ export function LandingPage({
             )}
             <button
               type="button"
-              onClick={() => onNavigate('jobs')}
+              onClick={() => (signedInEmail ? onNavigate('jobs') : onStartRegister())}
               className="px-5 py-2.5 text-sm font-semibold text-white bg-jf-navy hover:bg-jf-dark rounded-full transition-all shadow-sm hover:shadow-md whitespace-nowrap"
             >
               {copy.navStart}
@@ -714,7 +716,11 @@ export function LandingPage({
                 type="button"
                 onClick={() => {
                   setMobileNavOpen(false);
-                  onNavigate('jobs');
+                  if (signedInEmail) {
+                    onNavigate('jobs');
+                  } else {
+                    onStartRegister();
+                  }
                 }}
                 className="w-full px-4 py-2.5 text-sm font-semibold text-white bg-jf-navy hover:bg-jf-dark rounded-full"
               >
@@ -814,7 +820,7 @@ export function LandingPage({
                   if (signedInEmail) {
                     onNavigate('matching');
                   } else {
-                    onSignIn();
+                    onStartRegister();
                   }
                 }}
                 className="w-full sm:w-auto px-8 py-4 text-sm sm:text-base font-semibold text-jf-navy bg-white hover:bg-jf-soft/50 border border-jf-border-strong rounded-full transition-colors whitespace-nowrap"
@@ -1250,7 +1256,7 @@ export function LandingPage({
             <div className="pt-3 flex justify-center">
               <button
                 type="button"
-                onClick={() => onNavigate('jobs')}
+                onClick={() => (signedInEmail ? onNavigate('jobs') : onStartRegister())}
                 className="group px-8 py-4 text-sm sm:text-base font-bold text-jf-navy bg-jf-sky hover:bg-white rounded-full shadow-[0_16px_38px_-12px_rgba(169,216,245,0.45)] transition-all inline-flex items-center gap-2.5 whitespace-nowrap"
               >
                 <span>{copy.finalCta}</span>

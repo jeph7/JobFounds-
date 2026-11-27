@@ -24,6 +24,7 @@ export interface NormalizedCareerJob {
   url: string;
   atsSource: string;
   contentHash: string;
+  applicationDeadline?: string;
 }
 
 export interface CareerMonitorResult {
@@ -258,6 +259,119 @@ async function fetchAshbyJobs(
   }
 }
 
+async function fetchWorkdayJobs(
+  token: string,
+  fallbackCountry: string
+): Promise<NormalizedCareerJob[]> {
+  if (!isSourceEnabled('workday_api')) {
+    throw new Error('Source workday_api is paused or rate-limited by administrator.');
+  }
+  const [host, tenant, site] = token.split('|');
+  if (!host || !tenant || !site) {
+    throw new Error('Invalid Workday ATS token format (expected host|tenant|site).');
+  }
+  const apiUrl = `https://${host}/wday/cxs/${encodeURIComponent(tenant)}/${encodeURIComponent(site)}/jobs`;
+  if (!isSafePublicHttpUrl(apiUrl)) {
+    throw new Error(`Blocked unsafe Workday URL: ${apiUrl}`);
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 12000);
+  try {
+    const res = await fetch(apiUrl, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'JOBFOUNDS-CareerMonitor/1.0 (+https://jobfounds.com; respectful-public-ats)',
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({ appliedFacets: {}, limit: 20, offset: 0, searchText: '' }),
+    });
+    if (!res.ok) {
+      recordSourceCall('workday_api', false, `HTTP ${res.status} for ${host}`);
+      throw new Error(`Workday CXS API returned HTTP ${res.status} for "${host}"`);
+    }
+    const data = (await res.json()) as { jobPostings?: any[] };
+    recordSourceCall('workday_api', true);
+    const items = Array.isArray(data.jobPostings) ? data.jobPostings.slice(0, 80) : [];
+    return items.map((j, idx) => {
+      const title = clampStr(j.title || 'Open Role', 180);
+      const location = clampStr(j.locationsText || fallbackCountry || 'Global', 120);
+      const externalPath = String(j.externalPath || '').replace(/^\/+/, '');
+      const jobUrl = externalPath
+        ? sanitizeHttpUrl(`https://${host}/${site}/${externalPath}`)
+        : sanitizeHttpUrl(`https://${host}/${site}`);
+      const workMode = inferWorkMode(location, title);
+      const extKey = String(j.bulletFields?.[0] || externalPath || idx);
+      return {
+        externalId: `wd_${crypto.createHash('md5').update(extKey).digest('hex').slice(0, 14)}`,
+        title,
+        department: '',
+        location,
+        country: inferCountryFromLocation(location, fallbackCountry),
+        workMode,
+        contractType: 'Full-time',
+        skills: extractSkillsFromText(`${title} ${location}`),
+        url: jobUrl,
+        atsSource: 'Workday Official CXS API',
+        contentHash: computeJobHash({ title, department: '', location, workMode, url: jobUrl }),
+      };
+    });
+  } catch (err) {
+    recordSourceCall('workday_api', false, err instanceof Error ? err.message : String(err));
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function fetchSmartRecruitersJobs(
+  token: string,
+  fallbackCountry: string
+): Promise<NormalizedCareerJob[]> {
+  if (!isSourceEnabled('smartrecruiters_api')) {
+    throw new Error('Source smartrecruiters_api is paused or rate-limited by administrator.');
+  }
+  const url = `https://api.smartrecruiters.com/v1/companies/${encodeURIComponent(token)}/postings?limit=100`;
+  try {
+    const res = await fetchWithTimeout(url);
+    if (!res.ok) {
+      recordSourceCall('smartrecruiters_api', false, `HTTP ${res.status} for ${token}`);
+      throw new Error(`SmartRecruiters API returned HTTP ${res.status} for "${token}"`);
+    }
+    const data = (await res.json()) as { content?: any[] };
+    recordSourceCall('smartrecruiters_api', true);
+    const items = Array.isArray(data.content) ? data.content.slice(0, 100) : [];
+    return items.map((j) => {
+      const title = clampStr(j.name || 'Open Role', 180);
+      const city = j.location?.city || '';
+      const country = j.location?.country?.toUpperCase() || fallbackCountry || 'Global';
+      const location = clampStr([city, country].filter(Boolean).join(', ') || fallbackCountry || 'Global', 120);
+      const department = clampStr(j.department?.label || j.function?.label || '', 100);
+      const jobUrl = sanitizeHttpUrl(`https://jobs.smartrecruiters.com/${encodeURIComponent(token)}/${encodeURIComponent(String(j.id || ''))}`);
+      const workMode: 'Remote' | 'Hybrid' | 'On-site' = j.location?.remote
+        ? 'Remote'
+        : inferWorkMode(location, title);
+      return {
+        externalId: `sr_${String(j.id)}`,
+        title,
+        department,
+        location,
+        country: clampStr(country, 80),
+        workMode,
+        contractType: clampStr(j.typeOfEmployment?.label || 'Full-time', 60),
+        skills: extractSkillsFromText(`${title} ${department}`),
+        url: jobUrl,
+        atsSource: 'SmartRecruiters Official API',
+        contentHash: computeJobHash({ title, department, location, workMode, url: jobUrl }),
+      };
+    });
+  } catch (err) {
+    recordSourceCall('smartrecruiters_api', false, err instanceof Error ? err.message : String(err));
+    throw err;
+  }
+}
+
 async function isRobotsAllowed(targetUrl: string): Promise<boolean> {
   try {
     const parsed = new URL(targetUrl);
@@ -337,6 +451,10 @@ async function fetchCustomCareerJsonLd(
               String(item.jobLocationType || '').toUpperCase() === 'TELECOMMUTE'
                 ? 'Remote'
                 : inferWorkMode(location, title);
+            const deadline =
+              typeof item.validThrough === 'string' && item.validThrough.trim()
+                ? item.validThrough.trim().slice(0, 10)
+                : '';
             const extId = `ld_${crypto.createHash('md5').update(`${title}|${location}|${url}`).digest('hex').slice(0, 14)}`;
             jobs.push({
               externalId: extId,
@@ -353,6 +471,7 @@ async function fetchCustomCareerJsonLd(
               url,
               atsSource: 'Official Career Page (Schema.org JSON-LD)',
               contentHash: computeJobHash({ title, department: '', location, workMode, url }),
+              applicationDeadline: deadline,
             });
           }
         }
@@ -400,6 +519,10 @@ export async function monitorCompanyCareerPage(companyId: string): Promise<Caree
     fetchedJobs = await fetchLeverJobs(token, company.country);
   } else if (atsProvider === 'ashby' && token) {
     fetchedJobs = await fetchAshbyJobs(token, company.country);
+  } else if (atsProvider === 'workday' && token) {
+    fetchedJobs = await fetchWorkdayJobs(token, company.country);
+  } else if (atsProvider === 'smartrecruiters' && token) {
+    fetchedJobs = await fetchSmartRecruitersJobs(token, company.country);
   } else if (company.careersUrl && isSafePublicHttpUrl(company.careersUrl)) {
     const custom = await fetchCustomCareerJsonLd(company.careersUrl, company.country);
     fetchedJobs = custom.jobs;
@@ -433,8 +556,8 @@ export async function monitorCompanyCareerPage(companyId: string): Promise<Caree
           INSERT INTO career_jobs (
             id, company_id, external_id, title, department, location, country,
             work_mode, contract_type, skills_json, url, ats_source, content_hash,
-            status, first_seen_at, last_seen_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
+            application_deadline, status, first_seen_at, last_seen_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)
         `).run(
           id,
           companyId,
@@ -449,6 +572,7 @@ export async function monitorCompanyCareerPage(companyId: string): Promise<Caree
           job.url,
           job.atsSource,
           job.contentHash,
+          clampStr(job.applicationDeadline || '', 30),
           now,
           now
         );
@@ -470,7 +594,7 @@ export async function monitorCompanyCareerPage(companyId: string): Promise<Caree
           UPDATE career_jobs SET
             title = ?, department = ?, location = ?, country = ?,
             work_mode = ?, contract_type = ?, skills_json = ?, url = ?,
-            content_hash = ?, status = 'active', last_seen_at = ?, removed_at = NULL
+            content_hash = ?, application_deadline = ?, status = 'active', last_seen_at = ?, removed_at = NULL
           WHERE id = ?
         `).run(
           job.title,
@@ -482,6 +606,7 @@ export async function monitorCompanyCareerPage(companyId: string): Promise<Caree
           JSON.stringify(job.skills),
           job.url,
           job.contentHash,
+          clampStr(job.applicationDeadline || '', 30),
           now,
           prev.id
         );

@@ -318,6 +318,7 @@ Return ONLY valid JSON:
       "roleCategory": "HR Manager | Talent Acquisition | Recruitment Manager | Hiring Manager | Department Director | Head of Talent | Other",
       "publicProfileUrl": "https://... (only if real and verified in search, else empty string)",
       "publicChannel": "LinkedIn Public Profile / Official Careers Team / Press Page",
+      "publicEmail": "ONLY an officially published generic recruiting email found verbatim on the company's official website (e.g. careers@company.com), NEVER a guessed personal email — otherwise empty string",
       "sourceName": "Source name",
       "sourceUrl": "https://...",
       "confidenceLevel": "confirmed | probable | unverified",
@@ -360,6 +361,19 @@ Return ONLY valid JSON:
       const sourceUrl = sanitizeHttpUrl(raw.sourceUrl) || publicProfileUrl || groundingSources[0]?.uri || '';
       const hasVerifiableLink = Boolean(publicProfileUrl || sourceUrl);
 
+      // Only accept an officially published generic recruiting address matching the company's MX-verified domain
+      let safePublicEmail = '';
+      const rawEmail = String(raw.publicEmail || '').trim().toLowerCase();
+      if (
+        rawEmail &&
+        mxResult.verified &&
+        company.domain &&
+        rawEmail.endsWith(`@${company.domain.toLowerCase()}`) &&
+        /^(careers|jobs|recruiting|recruitment|recrutement|talent|hr|rh|people|hiring|apply|contact)@/i.test(rawEmail)
+      ) {
+        safePublicEmail = rawEmail;
+      }
+
       let confidenceLevel: ContactConfidenceLevel =
         raw.confidenceLevel === 'confirmed' || raw.confidenceLevel === 'probable'
           ? raw.confidenceLevel
@@ -385,6 +399,7 @@ Return ONLY valid JSON:
         roleCategory: clampStr(raw.roleCategory || 'Other', 80),
         publicProfileUrl,
         publicChannel: clampStr(raw.publicChannel || 'Public Professional Source', 120),
+        publicEmail: safePublicEmail,
         emailDomainVerified: Boolean(company.domain && mxResult.verified),
         mxVerified: mxResult.verified,
         sourceName: clampStr(raw.sourceName || groundingSources[0]?.title || 'Public Web Search', 120),
@@ -435,8 +450,13 @@ export interface IntelligenceMatchItem {
   score: number;
   breakdown: {
     skillsScore: number;
-    locationMobilityScore: number;
     experienceRoleScore: number;
+    educationScore: number;
+    languagesScore: number;
+    locationMobilityScore: number;
+    workAuthorizationScore: number;
+    availabilityScore: number;
+    salaryScore: number;
     signalReliabilityScore: number;
   };
   matchedSkills: string[];
@@ -450,12 +470,49 @@ export interface IntelligenceMatchItem {
     roleTitle: string;
     confidenceLevel: ContactConfidenceLevel;
     publicProfileUrl: string;
+    publicEmail?: string;
   } | null;
 }
 
 function normalizeTokens(items: string[] | undefined): string[] {
   if (!Array.isArray(items)) return [];
   return items.map((s) => String(s).trim().toLowerCase()).filter(Boolean);
+}
+
+function inferCountryExpectedLanguages(countryAndLoc: string): string[] {
+  const txt = countryAndLoc.toLowerCase();
+  const langs = new Set<string>(['english']);
+  if (/(france|paris|lyon|marseille|belgium|belgique|brussels|bruxelles|switzerland|suisse|geneva|gen[eè]ve|qu[eé]bec|montr[eé]al|luxembourg|haiti)/i.test(txt)) {
+    langs.add('french');
+  }
+  if (/(germany|allemagne|berlin|munich|frankfurt|austria|zurich)/i.test(txt)) {
+    langs.add('german');
+  }
+  if (/(spain|espagne|madrid|barcelona|mexico|colombia|argentina|chile)/i.test(txt)) {
+    langs.add('spanish');
+  }
+  if (/(brazil|br[eé]sil|portugal|lisbon|sao paulo)/i.test(txt)) {
+    langs.add('portuguese');
+  }
+  if (/(netherlands|amsterdam|rotterdam)/i.test(txt)) {
+    langs.add('dutch');
+  }
+  if (/(uae|dubai|saudi|qatar|morocco|tunisia|egypt)/i.test(txt)) {
+    langs.add('arabic');
+  }
+  return Array.from(langs);
+}
+
+function normalizeLanguageToken(raw: string): string {
+  const t = raw.toLowerCase();
+  if (/fr|fran[cç]ais|french/.test(t)) return 'french';
+  if (/en|anglais|english/.test(t)) return 'english';
+  if (/es|espagnol|spanish/.test(t)) return 'spanish';
+  if (/de|allemand|german/.test(t)) return 'german';
+  if (/pt|portugais|portuguese/.test(t)) return 'portuguese';
+  if (/ar|arabe|arabic/.test(t)) return 'arabic';
+  if (/nl|n[eé]erlandais|dutch/.test(t)) return 'dutch';
+  return t;
 }
 
 export function computeCandidateIntelligenceMatches(profile: {
@@ -489,12 +546,19 @@ export function computeCandidateIntelligenceMatches(profile: {
 
   const candSkills = normalizeTokens(profile.skills);
   const candCountries = normalizeTokens(profile.preferredCountries);
+  const candCities = normalizeTokens(profile.preferredCities);
   const candModes = normalizeTokens(profile.preferredWorkModes);
   const candSectors = normalizeTokens(profile.targetSectors);
+  const candLangs = normalizeTokens(profile.languages).map(normalizeLanguageToken);
   const titleWords = (profile.currentTitle || '')
     .toLowerCase()
     .split(/[^a-z0-9+#]+/)
     .filter((w) => w.length >= 3);
+  const yearsExp = typeof profile.yearsExperience === 'number' ? profile.yearsExperience : 0;
+  const degreeLow = (profile.highestDegree || '').toLowerCase();
+  const workAuthLow = (profile.workAuthorization || '').toLowerCase();
+  const availLow = (profile.availability || '').toLowerCase();
+  const minSalary = typeof profile.minSalaryAnnualUsd === 'number' ? profile.minSalaryAnnualUsd : 0;
 
   const results: IntelligenceMatchItem[] = [];
 
@@ -503,9 +567,11 @@ export function computeCandidateIntelligenceMatches(profile: {
     itemTitle: string;
     itemSkills: string[];
     itemCountry: string;
+    itemLocation: string;
     itemWorkMode?: string;
     reliability: number;
   }) => {
+    // 1. Skills alignment
     const reqSkills = Array.from(
       new Set([...normalizeTokens(params.itemSkills), ...normalizeTokens(params.company.frequentSkills)])
     );
@@ -513,55 +579,167 @@ export function computeCandidateIntelligenceMatches(profile: {
       candSkills.some((cs) => cs === rs || cs.includes(rs) || rs.includes(cs))
     );
     const missingSkills = reqSkills.filter((rs) => !matchedSkills.includes(rs)).slice(0, 6);
-
     const skillsScore =
       reqSkills.length > 0
         ? Math.min(100, Math.round((matchedSkills.length / Math.min(reqSkills.length, 6)) * 100))
         : 55;
 
-    // Location & international mobility
-    let locationMobilityScore = 60;
-    const itemCountryLow = (params.itemCountry || params.company.country || '').toLowerCase();
-    const isRemote = (params.itemWorkMode || '').toLowerCase() === 'remote';
-    if (isRemote && (candModes.length === 0 || candModes.includes('remote'))) {
-      locationMobilityScore = 95;
-    } else if (
-      candCountries.length === 0 ||
-      candCountries.some((c) => itemCountryLow.includes(c) || c.includes(itemCountryLow))
-    ) {
-      locationMobilityScore = 92;
-    } else if (profile.relocationReady) {
-      locationMobilityScore = 74;
-    } else {
-      locationMobilityScore = 40;
-    }
-
-    // Role / Sector alignment
+    // 2. Experience & Role/Sector alignment
     const combinedText = `${params.itemTitle} ${params.company.sector} ${params.company.officialName}`.toLowerCase();
     const titleHits = titleWords.filter((w) => combinedText.includes(w)).length;
     const sectorHit =
       candSectors.length > 0 &&
       candSectors.some((sec) => params.company.sector.toLowerCase().includes(sec));
-    const experienceRoleScore = Math.min(
-      100,
-      45 + titleHits * 18 + (sectorHit ? 22 : 0) + (profile.yearsExperience && profile.yearsExperience >= 3 ? 8 : 0)
+    const isSeniorRole = /\b(senior|staff|lead|principal|head|director|vp|manager|architect)\b/i.test(params.itemTitle);
+    const isJuniorRole = /\b(junior|entry|intern|stage|graduate|associate)\b/i.test(params.itemTitle);
+    let expMatchBonus = 10;
+    if (isSeniorRole) {
+      expMatchBonus = yearsExp >= 5 ? 20 : yearsExp >= 3 ? 8 : -10;
+    } else if (isJuniorRole) {
+      expMatchBonus = yearsExp <= 3 ? 18 : 10;
+    } else if (yearsExp >= 2) {
+      expMatchBonus = 15;
+    }
+    const experienceRoleScore = Math.max(
+      25,
+      Math.min(100, 42 + titleHits * 16 + (sectorHit ? 20 : 0) + expMatchBonus)
     );
 
+    // 3. Education / Formation fit
+    const needsAdvancedDegree = /\b(research|scientist|phd|machine learning|ai|economist|legal|counsel|medical|architect)\b/i.test(
+      params.itemTitle
+    );
+    let educationScore = 72;
+    if (!degreeLow) {
+      educationScore = 65;
+    } else if (/\b(phd|doctorat|doctorate)\b/.test(degreeLow)) {
+      educationScore = 98;
+    } else if (/\b(master|mba|msc|ing[eé]nieur|bac\+5|dipl[oô]me d'ing[eé]nieur)\b/.test(degreeLow)) {
+      educationScore = needsAdvancedDegree ? 92 : 95;
+    } else if (/\b(bachelor|licence|bac\+3|bac\+4|bsc)\b/.test(degreeLow)) {
+      educationScore = needsAdvancedDegree ? 74 : 88;
+    } else if (/\b(bts|dut|bac\+2|associate|diploma|bootcamp|certif)\b/.test(degreeLow)) {
+      educationScore = needsAdvancedDegree ? 55 : 76;
+    }
+
+    // 4. Languages match
+    const expectedLangs = inferCountryExpectedLanguages(`${params.itemCountry} ${params.itemLocation}`);
+    let languagesScore = 65;
+    if (candLangs.length > 0) {
+      const matchedLangs = expectedLangs.filter((l) => candLangs.includes(l));
+      if (matchedLangs.length === expectedLangs.length) {
+        languagesScore = 98;
+      } else if (matchedLangs.length > 0) {
+        languagesScore = 84;
+      } else if (candLangs.includes('english')) {
+        languagesScore = 72;
+      } else {
+        languagesScore = 42;
+      }
+    }
+
+    // 5. Preferred Countries, Cities & International Mobility
+    let locationMobilityScore = 60;
+    const itemCountryLow = (params.itemCountry || params.company.country || '').toLowerCase();
+    const itemLocLow = (params.itemLocation || params.company.location || '').toLowerCase();
+    const isRemote = (params.itemWorkMode || '').toLowerCase() === 'remote';
+    const cityMatch =
+      candCities.length > 0 && candCities.some((c) => itemLocLow.includes(c) || c.includes(itemLocLow));
+    const countryMatch =
+      candCountries.length === 0 ||
+      candCountries.some((c) => itemCountryLow.includes(c) || c.includes(itemCountryLow));
+    if (isRemote && (candModes.length === 0 || candModes.includes('remote'))) {
+      locationMobilityScore = 96;
+    } else if (cityMatch) {
+      locationMobilityScore = 98;
+    } else if (countryMatch) {
+      locationMobilityScore = 90;
+    } else if (profile.relocationReady) {
+      locationMobilityScore = 75;
+    } else {
+      locationMobilityScore = 38;
+    }
+
+    // 6. Work Authorization / Visa Compatibility
+    let workAuthorizationScore = 74;
+    const isUsTarget = /\b(united states|usa|us|new york|san francisco|austin)\b/i.test(`${itemCountryLow} ${itemLocLow}`);
+    const isEuTarget = /\b(france|germany|netherlands|ireland|spain|sweden|belgium|europe|eu|paris|berlin|amsterdam|dublin|madrid|stockholm)\b/i.test(`${itemCountryLow} ${itemLocLow}`);
+    const isCaTarget = /\b(canada|montreal|toronto|vancouver)\b/i.test(`${itemCountryLow} ${itemLocLow}`);
+    if (!workAuthLow) {
+      workAuthorizationScore = isRemote ? 82 : 68;
+    } else if (
+      /\b(citizen|citoyen|eu|ue|permanent|résident|resident|authorized|autoris[eé]|permis)\b/.test(workAuthLow)
+    ) {
+      if ((isEuTarget && /\b(eu|ue|france|germany|europe|schengen)\b/.test(workAuthLow)) ||
+          (isUsTarget && /\b(us|usa|green card|citizen)\b/.test(workAuthLow)) ||
+          (isCaTarget && /\b(canada|canadian|pr)\b/.test(workAuthLow))) {
+        workAuthorizationScore = 98;
+      } else {
+        workAuthorizationScore = isRemote ? 90 : 80;
+      }
+    } else if (/\b(sponsor|visa|relocat)\b/.test(workAuthLow)) {
+      // Large tech / global companies and remote roles have stronger sponsorship track records
+      const isGlobalEnterprise = /1000|5000|global/i.test(`${params.company.estimatedSize} ${params.company.country}`);
+      workAuthorizationScore = isRemote ? 86 : isGlobalEnterprise ? 78 : 58;
+    }
+
+    // 7. Availability fit
+    let availabilityScore = 82;
+    if (!availLow) {
+      availabilityScore = 75;
+    } else if (/\b(imm[eé]diat|immediate|now|asap|disponible|2 weeks|1 month|1 mois)\b/.test(availLow)) {
+      availabilityScore = 96;
+    } else if (/\b(2 month|3 month|2 mois|3 mois|notice|pr[eé]avis)\b/.test(availLow)) {
+      availabilityScore = 82;
+    } else {
+      availabilityScore = 66;
+    }
+
+    // 8. Salary expectations realism vs market/company scale
+    let salaryScore = 80;
+    if (minSalary > 0) {
+      const estimatedMarketCap = isUsTarget
+        ? isSeniorRole ? 210_000 : 145_000
+        : isEuTarget
+          ? isSeniorRole ? 125_000 : 85_000
+          : isSeniorRole ? 110_000 : 75_000;
+      if (minSalary <= estimatedMarketCap * 0.9) {
+        salaryScore = 95;
+      } else if (minSalary <= estimatedMarketCap * 1.15) {
+        salaryScore = 80;
+      } else if (minSalary <= estimatedMarketCap * 1.4) {
+        salaryScore = 60;
+      } else {
+        salaryScore = 40;
+      }
+    }
+
+    // 9. Source reliability
     const signalReliabilityScore = Math.min(100, Math.max(20, Math.round(params.reliability)));
 
     const total = Math.round(
-      skillsScore * 0.38 +
-        locationMobilityScore * 0.24 +
-        experienceRoleScore * 0.23 +
-        signalReliabilityScore * 0.15
+      skillsScore * 0.28 +
+        experienceRoleScore * 0.16 +
+        locationMobilityScore * 0.14 +
+        languagesScore * 0.09 +
+        educationScore * 0.08 +
+        workAuthorizationScore * 0.08 +
+        availabilityScore * 0.05 +
+        salaryScore * 0.05 +
+        signalReliabilityScore * 0.07
     );
 
     return {
       score: Math.min(99, Math.max(15, total)),
       breakdown: {
         skillsScore,
-        locationMobilityScore,
         experienceRoleScore,
+        educationScore,
+        languagesScore,
+        locationMobilityScore,
+        workAuthorizationScore,
+        availabilityScore,
+        salaryScore,
         signalReliabilityScore,
       },
       matchedSkills: matchedSkills.slice(0, 8),
@@ -578,6 +756,7 @@ export function computeCandidateIntelligenceMatches(profile: {
       itemTitle: `${job.title} ${job.department}`,
       itemSkills: job.skills,
       itemCountry: job.country || company.country,
+      itemLocation: job.location || company.location,
       itemWorkMode: job.workMode,
       reliability: 96,
     });
@@ -597,7 +776,7 @@ export function computeCandidateIntelligenceMatches(profile: {
         scored.matchedSkills.length
           ? `Compétences alignées : ${scored.matchedSkills.join(', ')}.`
           : `Alignement sectoriel et rôle sur ${company.sector || company.officialName}.`
-      }${profile.workAuthorization ? ` Autorisation déclarée : ${profile.workAuthorization}.` : ''}`,
+      } Langues : ${scored.breakdown.languagesScore}% · Formation : ${scored.breakdown.educationScore}% · Mobilité : ${scored.breakdown.locationMobilityScore}%${profile.workAuthorization ? ` · Autorisation : ${profile.workAuthorization}` : ''}${profile.availability ? ` · Dispo : ${profile.availability}` : ''}.`,
       evidenceSummary: `Détectée via ${job.atsSource} le ${job.firstSeenAt.slice(0, 10)} (statut actif).`,
       evidenceUrl: job.url || company.careersUrl,
       detectedAt: job.firstSeenAt,
@@ -607,6 +786,7 @@ export function computeCandidateIntelligenceMatches(profile: {
             roleTitle: bestContact.roleTitle,
             confidenceLevel: bestContact.confidenceLevel,
             publicProfileUrl: bestContact.publicProfileUrl,
+            publicEmail: bestContact.publicEmail || '',
           }
         : null,
     });
@@ -622,6 +802,7 @@ export function computeCandidateIntelligenceMatches(profile: {
       itemTitle: `${sig.title} ${sig.summary}`,
       itemSkills: sig.skillsInferred,
       itemCountry: company.country,
+      itemLocation: company.location,
       reliability: sig.reliabilityScore,
     });
     const bestContact = (contactsByCompany.get(company.id) || [])[0] || null;
@@ -647,7 +828,7 @@ export function computeCandidateIntelligenceMatches(profile: {
         scored.matchedSkills.length
           ? `Vos compétences (${scored.matchedSkills.join(', ')}) répondent aux besoins inférés.`
           : `Pertinent pour une approche spontanée ciblée dans le secteur ${company.sector || 'cible'}.`
-      }`,
+      } Langues : ${scored.breakdown.languagesScore}% · Formation : ${scored.breakdown.educationScore}% · Mobilité : ${scored.breakdown.locationMobilityScore}%.`,
       evidenceSummary: `${sig.summary}${sig.evidenceQuote ? ` — « ${sig.evidenceQuote} »` : ''} (Source: ${sig.sourceName})`,
       evidenceUrl: sig.sourceUrl || company.careersUrl || company.officialWebsite,
       detectedAt: sig.detectedAt,
@@ -657,6 +838,7 @@ export function computeCandidateIntelligenceMatches(profile: {
             roleTitle: bestContact.roleTitle,
             confidenceLevel: bestContact.confidenceLevel,
             publicProfileUrl: bestContact.publicProfileUrl,
+            publicEmail: bestContact.publicEmail || '',
           }
         : null,
     });
@@ -719,7 +901,10 @@ export function getResendConfigStatus(): {
   ready: boolean;
 } {
   const resendKeyConfigured = Boolean(process.env.RESEND_API_KEY?.trim());
-  const fromEmail = process.env.NOTIFICATION_FROM_EMAIL?.trim() || '';
+  const fromEmail =
+    process.env.RESEND_FROM_EMAIL?.trim() ||
+    process.env.NOTIFICATION_FROM_EMAIL?.trim() ||
+    '';
   const fromEmailConfigured = Boolean(fromEmail);
   return {
     resendKeyConfigured,
@@ -736,11 +921,13 @@ async function sendTransactionalEmailIfConfigured(params: {
   actionUrl?: string;
 }): Promise<{ emailSent: boolean; emailReason: string; messageId?: string }> {
   const apiKey = process.env.RESEND_API_KEY?.trim();
-  const from = process.env.NOTIFICATION_FROM_EMAIL?.trim();
+  const from =
+    process.env.RESEND_FROM_EMAIL?.trim() ||
+    process.env.NOTIFICATION_FROM_EMAIL?.trim();
   if (!apiKey || !from) {
     return {
       emailSent: false,
-      emailReason: 'Email relay not configured (set RESEND_API_KEY and NOTIFICATION_FROM_EMAIL)',
+      emailReason: 'Email relay not configured (set RESEND_API_KEY and RESEND_FROM_EMAIL)',
     };
   }
   if (!isSourceEnabled('resend_email')) {
@@ -1150,7 +1337,7 @@ export async function runCronBatch(options?: {
   writeAuditLog({
     actorUid: options?.trigger || 'hostinger_cron',
     actorRole: 'system',
-    action: 'cron_batch_completed',
+    action: failed > 0 ? 'cron_batch_failure_alert' : 'cron_batch_completed',
     targetType: 'worker',
     targetId: options?.trigger || 'hostinger_cron',
     details: summary,
@@ -1649,6 +1836,22 @@ export async function syncGmailRecruiterReplies(params: {
       reason: classification.reason,
       receivedAt: receivedIso,
     });
+
+    if (persisted.created) {
+      createNotification({
+        uid: params.uid,
+        type: 'application_update',
+        title: `Réponse recruteur Gmail — ${matchedApp.company} (${classification.detectedStage})`,
+        body: `${subject || sender} : ${snippet}`.slice(0, 420),
+        companyName: matchedApp.company,
+        classification: 'confirmed_job',
+        channelStatus: {
+          inApp: true,
+          emailSent: false,
+          pushReady: true,
+        },
+      });
+    }
 
     matchedReplies.push({
       applicationId: matchedApp.id,

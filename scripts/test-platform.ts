@@ -1,32 +1,79 @@
+import 'dotenv/config';
 import assert from 'node:assert/strict';
-import { clampStr, isSafePublicHttpUrl, sanitizeHttpUrl } from '../serverSecurity.ts';
+import http from 'node:http';
+import express from 'express';
+import {
+  attachFirebaseAuth,
+  clampStr,
+  isSafePublicHttpUrl,
+  registerAppTokenVerifier,
+  requireFirebaseAuth,
+  sanitizeHttpUrl,
+} from '../serverSecurity.ts';
 import { safeExternalUrl } from '../src/utils/safeUrl.ts';
 import {
+  confirmPortalSubmission,
+  createAuthUserRecord,
+  createEngineDbBackup,
+  deleteAuthUserByUid,
+  detectAtsFromCareersUrl,
   enqueueBackgroundJob,
+  getAuthUserByEmail,
   getCompanyById,
   getEngineDb,
   getEngineOverviewMetrics,
+  getLatestActiveVerificationCode,
+  getSubmissionAttachmentForActor,
   isSourceEnabled,
   listAuditLogs,
   listCompanyCareerChanges,
   listCompanyCareerJobs,
   listCrmEmailSyncEvents,
+  listEmployerReceivedApplications,
+  listEngineDbBackups,
+  listUserApplicationSubmissions,
   listUserNotifications,
   mergeCompanies,
   recordCompanySignal,
   recordCrmEmailSyncEvent,
+  respondToEmployerApplication,
   setSourceEnabled,
   upsertCandidateSubscription,
   upsertCompany,
   upsertHrContact,
   writeAuditLog,
 } from '../serverEngineDb.ts';
+import {
+  createAuthRouter,
+  createPasswordCredentials,
+  generateFiveDigitCode,
+  issueAndSendFiveDigitCode,
+  issueAppSessionToken,
+  verifyAppSessionToken,
+  verifyFiveDigitCodeForUser,
+  verifyPasswordCredentials,
+} from '../serverAuthEngine.ts';
 import { monitorCompanyCareerPage } from '../serverCareerMonitor.ts';
+import {
+  checkLiveJobAvailability,
+  detectScamRedFlags,
+  submitRealApplication,
+  verifyResendDomainStatus,
+} from '../serverApplicationEngine.ts';
+import { fetchAggregatedLiveJobFeeds, matchJobGeographyScore, type NormalizedFeedJob } from '../serverJobFeeds.ts';
+import {
+  computeBaselineMatch,
+  initialCandidateProfile,
+  initialCvDocuments,
+  isLegacyDemoCv,
+  isLegacyDemoProfile,
+} from '../src/data/initialData.ts';
 import {
   classifyRecruiterEmailReply,
   computeCandidateIntelligenceMatches,
   dispatchNotificationsForCandidate,
   getResendConfigStatus,
+  runCronBatch,
   runWorkerTick,
   verifyCorporateDomainMx,
 } from '../serverWorkerEngine.ts';
@@ -507,6 +554,749 @@ async function runTests() {
       const rHistory = await fetch('http://127.0.0.1:3000/api/crm/email-sync-history');
       assert.equal(rHistory.status, 401);
     });
+
+    // 11. Live Job Availability Check, Scam Filter, ATS Merge & 9-Criteria Matching
+    await check('Live availability check blocks SSRF, detects scam red flags, merges verified ATS jobs & scores all 9 criteria', async () => {
+      // SSRF block
+      const unsafeCheck = await checkLiveJobAvailability('http://127.0.0.1:3000/api/health');
+      assert.equal(unsafeCheck.available, false);
+      assert.equal(unsafeCheck.status, 'unreachable');
+
+      // Live public ATS URL check
+      const liveCheck = await checkLiveJobAvailability('https://jobs.ashbyhq.com/linear');
+      assert.ok(
+        liveCheck.status === 'available' || liveCheck.status === 'unverifiable',
+        `Expected available or unverifiable for public Ashby URL, got ${liveCheck.status}`
+      );
+
+      // Scam red-flag detection
+      const scamFlags = detectScamRedFlags(
+        'Urgent remote job! Pay $200 registration fee via Western Union and contact us only on Telegram @recruiter.'
+      );
+      assert.ok(scamFlags.length > 0, 'Expected scam red-flag detector to catch upfront-fee / Telegram-only scam');
+      assert.equal(
+        detectScamRedFlags('Senior TypeScript Engineer — Full-time CDI in Paris with official ATS.').length,
+        0
+      );
+
+      // 9-criteria matching verification
+      const matches = computeCandidateIntelligenceMatches({
+        currentTitle: 'Senior Full-Stack Engineer',
+        yearsExperience: 6,
+        highestDegree: 'Master in Computer Science',
+        skills: ['TypeScript', 'React', 'Node.js', 'PostgreSQL'],
+        languages: ['French', 'English'],
+        preferredCountries: ['United States', 'France'],
+        preferredWorkModes: ['Remote', 'Hybrid'],
+        relocationReady: true,
+        workAuthorization: 'EU Citizen / Visa sponsorship eligible',
+        availability: 'Immediate (1 month notice)',
+        minSalaryAnnualUsd: 90000,
+        targetSectors: ['Developer Tools'],
+      });
+      const m = matches.find((item) => item.companyId === primaryCompanyId);
+      assert.ok(m, 'Expected match for primary test company');
+      const serialized = serializeMatchItem(m);
+      for (const dimKey of [
+        'skills',
+        'experience',
+        'education',
+        'languages',
+        'locationAndMobility',
+        'workAuthorization',
+        'availability',
+        'salary',
+        'signalReliability',
+      ] as const) {
+        assert.equal(
+          typeof serialized.breakdown[dimKey],
+          'number',
+          `Expected numeric 9-criteria breakdown.${dimKey}`
+        );
+      }
+
+      // ATS merge inside live feeds
+      const feedResult = await fetchAggregatedLiveJobFeeds({ query: '', country: '' });
+      assert.ok(
+        feedResult.jobs.some((j) => j.id.startsWith('ats_')),
+        'Expected verified SQLite ATS career jobs to be merged into aggregated live job feeds'
+      );
+    });
+
+    // 12. Honest Real Application Submission Engine, Ownership Scoping & Auth Enforcement
+    await check('Application submission enforces explicit authorization, attachment validation, honest status & user ownership', async () => {
+      // Must reject if explicitAuthorization is false
+      await assert.rejects(
+        () =>
+          submitRealApplication({
+            userId: testUid,
+            candidateEmail: 'candidate-test@example.com',
+            candidateName: 'Test Candidate',
+            companyId: primaryCompanyId,
+            companyName: 'Linear TestCorp',
+            roleTitle: 'Senior Engineer',
+            opportunityType: 'published_job',
+            channel: 'official_portal',
+            officialUrl: 'https://jobs.ashbyhq.com/linear',
+            subject: 'Application',
+            coverLetter: 'Cover letter body',
+            explicitAuthorization: false,
+          }),
+        /autorisation|explicit/i
+      );
+
+      // Must reject dangerous attachment MIME types
+      await assert.rejects(
+        () =>
+          submitRealApplication({
+            userId: testUid,
+            candidateEmail: 'candidate-test@example.com',
+            candidateName: 'Test Candidate',
+            companyName: 'Linear TestCorp',
+            roleTitle: 'Senior Engineer',
+            opportunityType: 'published_job',
+            channel: 'official_portal',
+            officialUrl: 'https://jobs.ashbyhq.com/linear',
+            subject: 'Application',
+            coverLetter: 'Cover letter body',
+            attachments: [
+              {
+                filename: 'malware.exe',
+                contentType: 'application/x-msdownload',
+                base64Content: Buffer.from('MZtest').toString('base64'),
+              },
+            ],
+            explicitAuthorization: true,
+          }),
+        /autoris|mime|unsupported|type|format/i
+      );
+
+      // Official portal submission MUST return transmitted: false and awaiting_portal_confirmation
+      const portalRes = await submitRealApplication({
+        userId: testUid,
+        candidateEmail: 'candidate-test@example.com',
+        candidateName: 'Test Candidate',
+        companyId: primaryCompanyId,
+        companyName: 'Linear TestCorp',
+        roleTitle: 'Senior Full-Stack Engineer',
+        opportunityType: 'published_job',
+        channel: 'official_portal',
+        officialUrl: 'https://jobs.ashbyhq.com/linear',
+        subject: 'Application — Senior Full-Stack Engineer',
+        coverLetter: 'Interested in joining the engineering team.',
+        attachments: [
+          {
+            filename: 'cv-test.txt',
+            contentType: 'text/plain',
+            base64Content: Buffer.from('Test CV content').toString('base64'),
+          },
+        ],
+        explicitAuthorization: true,
+      });
+      assert.equal(portalRes.transmitted, false, 'Official portal handoff must NEVER pretend transmitted=true');
+      assert.equal(portalRes.submission.deliveryStatus, 'awaiting_portal_confirmation');
+
+      // Different user must NOT be able to confirm another user's submission
+      const wrongUserConfirm = confirmPortalSubmission({
+        submissionId: portalRes.submission.id,
+        userId: 'other_uid_forbidden',
+      });
+      assert.equal(wrongUserConfirm, null, 'Expected cross-user confirmation to be blocked');
+
+      // Owner confirmation transitions status cleanly
+      const ownerConfirmed = confirmPortalSubmission({
+        submissionId: portalRes.submission.id,
+        userId: testUid,
+        portalReference: 'ATS-CONF-2026',
+      });
+      assert.ok(ownerConfirmed);
+      assert.equal(ownerConfirmed.deliveryStatus, 'portal_confirmed_by_user');
+
+      const storedSubs = listUserApplicationSubmissions(testUid, 10);
+      assert.ok(storedSubs.some((s) => s.id === portalRes.submission.id));
+
+      // Verify new HTTP application endpoints enforce 401 Firebase Auth
+      for (const route of [
+        { method: 'POST', path: '/api/jobs/check-availability', body: { url: 'https://jobs.ashbyhq.com/linear' } },
+        { method: 'POST', path: '/api/applications/submit', body: { companyName: 'Test' } },
+        { method: 'GET', path: '/api/applications/submissions' },
+        { method: 'GET', path: '/api/employer/applications' },
+        { method: 'GET', path: '/api/email/status' },
+      ]) {
+        const res = await fetch(`http://127.0.0.1:3000${route.path}`, {
+          method: route.method,
+          headers: route.body ? { 'Content-Type': 'application/json' } : undefined,
+          body: route.body ? JSON.stringify(route.body) : undefined,
+        });
+        assert.equal(res.status, 401, `Expected 401 on unauthenticated ${route.method} ${route.path}`);
+      }
+    });
+
+    // 13. E2E-C & E2E-D: Complete Direct Application Loop (Candidate -> Employer Inbox -> Attachment Download -> Employer Reply -> Candidate Notification & CRM)
+    const testRecruiterUid = `test_recruiter_${Date.now()}`;
+    await check('E2E-C/D: Direct application lands in employer inbox with CV attachment, strict access control, employer reply & candidate notification', async () => {
+      const cvText = 'CV Candidat Test — Senior Full-Stack Engineer TypeScript React Node.js';
+      const directRes = await submitRealApplication({
+        userId: testUid,
+        recruiterId: testRecruiterUid,
+        candidateName: 'Alice Martin',
+        candidateEmail: 'alice.martin@example.com',
+        companyId: primaryCompanyId,
+        companyName: 'Linear TestCorp',
+        roleTitle: 'Staff Platform Engineer',
+        opportunityType: 'published_job',
+        classification: 'confirmed_job',
+        channel: 'jobfounds_direct',
+        subject: 'Candidature directe — Staff Platform Engineer',
+        coverLetter: 'Bonjour, je souhaite rejoindre votre équipe plateforme et je joins mon CV adapté.',
+        cvVersionName: 'CV Alice Martin — Plateforme',
+        attachments: [
+          {
+            filename: 'CV_Alice_Martin.txt',
+            contentType: 'text/plain',
+            base64Content: Buffer.from(cvText, 'utf8').toString('base64'),
+          },
+        ],
+        explicitAuthorization: true,
+      });
+      assert.equal(directRes.transmitted, true);
+      assert.equal(directRes.deliveryStatus, 'transmitted_jobfounds_portal');
+      assert.equal(directRes.submission.recruiterId, testRecruiterUid);
+
+      // Employer receives application in their inbox
+      const employerInbox = listEmployerReceivedApplications(testRecruiterUid, 20);
+      assert.ok(employerInbox.some((a) => a.id === directRes.submission.id));
+      const received = employerInbox.find((a) => a.id === directRes.submission.id)!;
+      assert.equal(received.candidateName, 'Alice Martin');
+      assert.equal(received.attachments.length, 1);
+
+      // Employer can download candidate attachment; unauthorized 3rd party MUST be blocked
+      const attOk = getSubmissionAttachmentForActor({
+        submissionId: received.id,
+        actorUid: testRecruiterUid,
+        attachmentIndex: 0,
+      });
+      assert.ok(attOk);
+      assert.equal(attOk.buffer.toString('utf8'), cvText);
+
+      const attForbidden = getSubmissionAttachmentForActor({
+        submissionId: received.id,
+        actorUid: 'intruder_uid_blocked',
+        attachmentIndex: 0,
+      });
+      assert.equal(attForbidden, null, 'Unauthorized actor must not access candidate CV attachment');
+
+      // Employer was notified of incoming direct application
+      const recruiterNotifs = listUserNotifications(testRecruiterUid, 10);
+      assert.ok(recruiterNotifs.some((n) => n.title.includes('Staff Platform Engineer')));
+
+      // Employer responds & updates status -> candidate submission reflects reply cleanly
+      const wrongRecruiterReply = respondToEmployerApplication({
+        submissionId: received.id,
+        recruiterId: 'intruder_recruiter',
+        status: 'interview_scheduled',
+        replyMessage: 'Spoofed reply',
+      });
+      assert.equal(wrongRecruiterReply, null, 'Cross-recruiter reply must be blocked');
+
+      const replied = respondToEmployerApplication({
+        submissionId: received.id,
+        recruiterId: testRecruiterUid,
+        status: 'interview_scheduled',
+        replyMessage: 'Bonjour Alice, nous souhaitons planifier un entretien technique jeudi à 14h.',
+      });
+      assert.ok(replied);
+      assert.equal(replied.employerStatus, 'interview_scheduled');
+      assert.ok(replied.employerReply.includes('entretien technique'));
+    });
+
+    // 14. E2E-B & ATS Coverage: Workday + SmartRecruiters ATS Detection, Resend Domain Diagnostics & Spontaneous Email Honesty
+    await check('E2E-B/ATS: Workday & SmartRecruiters detection, Resend domain diagnostics & honest Resend unconfigured handling', async () => {
+      const wd = detectAtsFromCareersUrl('https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite');
+      assert.equal(wd.provider, 'workday');
+      assert.equal(wd.token, 'nvidia.wd5.myworkdayjobs.com|nvidia|NVIDIAExternalCareerSite');
+
+      const sr = detectAtsFromCareersUrl('https://jobs.smartrecruiters.com/Visa');
+      assert.equal(sr.provider, 'smartrecruiters');
+      assert.equal(sr.token, 'Visa');
+
+      const diag = await verifyResendDomainStatus();
+      assert.equal(typeof diag.ready, 'boolean');
+      assert.equal(typeof diag.dnsSpfDetected, 'boolean');
+      assert.equal(typeof diag.dnsDmarcDetected, 'boolean');
+
+      // Spontaneous application via resend_email when Resend is unconfigured MUST honestly return transmitted: false
+      if (!diag.ready) {
+        const spontRes = await submitRealApplication({
+          userId: testUid,
+          candidateName: 'Alice Martin',
+          candidateEmail: 'alice.martin@example.com',
+          companyId: primaryCompanyId,
+          companyName: 'Linear TestCorp',
+          roleTitle: 'Candidature spontanée — Ingénieur IA',
+          opportunityType: 'hidden_opportunity',
+          classification: 'probable_hiring_signal',
+          channel: 'resend_email',
+          recipientEmail: 'careers@stripe.com',
+          subject: 'Candidature spontanée — Ingénieur IA',
+          coverLetter: 'Suite à votre signal d’expansion en Europe, je vous propose ma candidature spontanée.',
+          explicitAuthorization: true,
+        });
+        assert.equal(spontRes.transmitted, false, 'Must never fake email transmission when Resend is not configured');
+        assert.equal(spontRes.deliveryStatus, 'failed');
+        assert.equal(spontRes.mxVerified, true, 'Expected real DNS MX verification on stripe.com');
+      }
+    });
+
+    // 15. E2E-E & E2E-F: Offline Autonomous Cron Batch, SQLite Backup Rotation & Live HTTP Security Headers
+    await check('E2E-E/F: Offline runCronBatch monitoring, SQLite backup creation/rotation & live HTTP security headers', async () => {
+      const cronSummary = await runCronBatch({
+        maxJobs: 2,
+        maxDurationMs: 15_000,
+        maxMemoryMb: 1800,
+        trigger: 'e2e_test_cron',
+      });
+      assert.equal(typeof cronSummary.processed, 'number');
+      assert.equal(typeof cronSummary.remainingQueued, 'number');
+
+      const backup = createEngineDbBackup('e2e_test', 7);
+      assert.ok(backup.filename.startsWith('jobfounds-'));
+      assert.ok(backup.sizeBytes > 0);
+      const allBackups = listEngineDbBackups();
+      assert.ok(allBackups.some((b) => b.filename === backup.filename));
+
+      const healthRes = await fetch('http://127.0.0.1:3000/api/health');
+      assert.equal(healthRes.status, 200);
+      assert.equal(healthRes.headers.get('x-content-type-options'), 'nosniff');
+      assert.equal(healthRes.headers.get('referrer-policy'), 'strict-origin-when-cross-origin');
+      const healthBody = (await healthRes.json()) as any;
+      assert.equal(healthBody.ok, true);
+      assert.equal(healthBody.engine.sqliteReady, true);
+      assert.ok(typeof healthBody.engine.backupsCount === 'number' && healthBody.engine.backupsCount >= 0);
+      assert.ok(typeof healthBody.engine.nodeVersion === 'string' && healthBody.engine.nodeVersion.startsWith('v'));
+    });
+
+    // 16. Zero Fake Demo Data + 9-Criteria Unified Baseline Matching
+    await check('Zero fake initial data (profile/CV empty), safe legacy purge & unified 9-criteria baseline match', () => {
+      assert.equal(initialCandidateProfile.fullName, '');
+      assert.equal(initialCandidateProfile.skills.length, 0);
+      assert.equal(initialCvDocuments.length, 0);
+
+      // Legacy demo detection must purge ONLY old fake seeds, never real user records
+      assert.equal(
+        isLegacyDemoProfile({
+          ...initialCandidateProfile,
+          fullName: 'Candidat JOBFOUNDS',
+          currentTitle: 'Senior Full-Stack & Product Engineer',
+          yearsExperience: 6,
+          originCountry: 'France',
+        }),
+        true
+      );
+      assert.equal(
+        isLegacyDemoProfile({
+          ...initialCandidateProfile,
+          fullName: 'Jean-Marc Pierre',
+          currentTitle: 'Software Engineer',
+        }),
+        false
+      );
+      assert.equal(
+        isLegacyDemoCv({
+          id: 'cv-primary-1',
+          versionName: 'CV',
+          updatedAt: '2026-01-01',
+          template: 'executive',
+          fullName: 'Candidat JOBFOUNDS',
+          headline: '',
+          email: 'contact@jobfounds.com',
+          phone: '+33 6 00 00 00 00',
+          location: '',
+          linkedin: '',
+          summary: '',
+          experiences: [],
+          education: [],
+          skills: [],
+          languages: [],
+        }),
+        true
+      );
+      assert.equal(
+        isLegacyDemoCv({
+          id: 'cv-real-1',
+          versionName: 'Mon CV',
+          updatedAt: '2026-01-01',
+          template: 'executive',
+          fullName: 'Jean-Marc Pierre',
+          headline: 'Engineer',
+          email: 'jm@realmail.com',
+          phone: '+509 0000 0000',
+          location: 'Port-au-Prince',
+          linkedin: '',
+          summary: '',
+          experiences: [],
+          education: [],
+          skills: ['TypeScript'],
+          languages: ['Français'],
+        }),
+        false
+      );
+
+      const baseline = computeBaselineMatch(
+        {
+          ...initialCandidateProfile,
+          fullName: 'Real Candidate',
+          currentTitle: 'Senior TypeScript Engineer',
+          yearsExperience: 6,
+          highestDegree: 'Master Computer Science',
+          skills: ['TypeScript', 'React', 'Node.js'],
+          languages: ['Français', 'English'],
+          preferredCountries: ['Canada', 'France'],
+          preferredWorkModes: ['Remote', 'Hybrid'],
+          relocationReady: true,
+          workAuthorization: 'Work permit / Visa sponsorship eligible',
+          availability: 'Immediate',
+          minSalaryAnnualUsd: 80000,
+        },
+        {
+          id: 'job_test_9',
+          title: 'Senior TypeScript Engineer',
+          company: 'Real Corp',
+          country: 'Canada',
+          city: 'Montreal',
+          workMode: 'Remote',
+          contractType: 'Full-time',
+          experienceLevel: 'Senior',
+          degreeRequired: 'Master',
+          salaryRange: '$100,000 - $120,000 USD',
+          salaryMinAnnualUsd: 100000,
+          languages: ['English', 'French'],
+          skills: ['TypeScript', 'React', 'SQL'],
+          publishedDate: new Date().toISOString().slice(0, 10),
+          sourceName: 'Official ATS',
+          sourceUrl: 'https://boards.greenhouse.io/realcorp/jobs/1',
+          verificationStatus: 'Verified',
+          verificationSummary: 'Verified official ATS',
+          description: 'Build reliable software.',
+          visaSponsorship: 'Available',
+        }
+      );
+
+      assert.ok(baseline.score >= 60 && baseline.score <= 100);
+      for (const key of [
+        'skills',
+        'experience',
+        'education',
+        'languages',
+        'locationAndMobility',
+        'workAuthorization',
+        'availability',
+        'salary',
+        'sourceReliability',
+      ] as const) {
+        assert.equal(typeof baseline.breakdown[key], 'number', `Expected 9-criteria breakdown.${key}`);
+      }
+    });
+
+    // 17. International 7-Continent Geography Matching & Multi-Region Live Feeds (Zero Cross-Continent Leakage)
+    await check('7-Continent strict geography matching (4-tier, zero leakage) & live international feeds', async () => {
+      const mkJob = (
+        country: string,
+        city: string,
+        workMode: 'Remote' | 'Hybrid' | 'On-site' = 'On-site',
+        title = 'Software Engineer'
+      ): NormalizedFeedJob => ({
+        id: `geo_${country}_${city}`,
+        title,
+        company: 'Global Org',
+        country,
+        city,
+        workMode,
+        contractType: 'Full-time',
+        experienceLevel: 'Mid-level',
+        degreeRequired: 'Not specified',
+        salaryRange: 'Not disclosed',
+        languages: ['English'],
+        skills: ['TypeScript'],
+        publishedDate: new Date().toISOString().slice(0, 10),
+        sourceName: 'Official ATS',
+        sourceUrl: 'https://example.org/jobs/1',
+        verificationStatus: 'Verified',
+        verificationSummary: 'Verified',
+        description: 'Role',
+      });
+
+      // Exact country & region member matches -> tier 3
+      assert.equal(matchJobGeographyScore(mkJob('France', 'Paris'), ['Europe']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Canada', 'Montreal'), ['Amérique du Nord']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Brazil', 'Sao Paulo'), ['Amérique latine']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Haiti', 'Port-au-Prince'), ['Caraïbes']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Haiti', 'Port-au-Prince'), ['Haïti']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Senegal', 'Dakar'), ['Afrique']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Japan', 'Tokyo'), ['Asie']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('Australia', 'Sydney'), ['Océanie']), 3);
+
+      // Haiti belongs strictly to Caribbean / Americas, NEVER Africa or Europe
+      assert.equal(matchJobGeographyScore(mkJob('Haiti', 'Port-au-Prince'), ['Afrique']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('Haiti', 'Port-au-Prince'), ['Europe']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('Americas', 'Remote', 'Remote'), ['Haïti']), 2);
+      assert.equal(matchJobGeographyScore(mkJob('Caribbean', 'Remote', 'Remote'), ['Haïti']), 2);
+      assert.equal(matchJobGeographyScore(mkJob('EMEA', 'Remote', 'Remote'), ['Haïti']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('EMEA', 'Remote', 'Remote'), ['Caraïbes']), 0);
+
+      // Anti-leakage: UK / Ireland / Spain / US-only / South Africa / European-restricted EMEA MUST NEVER leak
+      assert.equal(matchJobGeographyScore(mkJob('UK', 'UK', 'Remote', 'Account Executive EMEA'), ['Sénégal']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('Ireland, Spain, UK', 'Remote', 'Remote'), ['Sénégal']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('Europe, EMEA, Germany, European timezones', 'Remote', 'Remote'), ['Sénégal']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('South Africa', 'Cape Town', 'Remote'), ['Sénégal']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('South Africa', 'Cape Town', 'Remote'), ['Afrique']), 3);
+      assert.equal(matchJobGeographyScore(mkJob('UK', 'London', 'Remote'), ['Haïti']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('USA Remote', 'Remote', 'Remote'), ['Haïti']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('USA Remote', 'Remote', 'Remote'), ['France']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('Germany', 'Berlin', 'On-site'), ['Océanie']), 0);
+      assert.equal(matchJobGeographyScore(mkJob('Brazil', 'Sao Paulo', 'On-site'), ['Afrique']), 0);
+      // Regional EMEA remote matches Europe & Africa (tier 2)
+      assert.equal(matchJobGeographyScore(mkJob('EMEA', 'Remote', 'Remote'), ['Europe']), 2);
+      assert.equal(matchJobGeographyScore(mkJob('EMEA', 'Remote', 'Remote'), ['Afrique']), 2);
+
+      // Unrestricted Worldwide remote matches everywhere as tier 1 (strictly below tier 3 & tier 2)
+      assert.equal(matchJobGeographyScore(mkJob('Worldwide', 'Remote', 'Remote'), ['Caraïbes']), 1);
+      assert.equal(matchJobGeographyScore(mkJob('Anywhere', 'Remote', 'Remote'), ['Haïti']), 1);
+
+      // Query live HTTP /api/jobs/feeds across diverse regions & countries and verify zero cross-country leakage
+      for (const region of ['Europe', 'Amérique du Nord', 'Amérique latine', 'Caraïbes', 'Afrique', 'Asie', 'Océanie']) {
+        const res = await fetch('http://127.0.0.1:3000/api/jobs/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: '', country: region }),
+        });
+        assert.equal(res.status, 200, `Expected 200 for international feed region=${region}`);
+        const payload = (await res.json()) as {
+          jobs?: Array<{ sourceUrl?: string; country?: string; city?: string }>;
+          activeProviders?: string[];
+        };
+        assert.ok(Array.isArray(payload.jobs) && payload.jobs.length > 0, `Expected real jobs for region=${region}`);
+        assert.ok(
+          payload.jobs.every((j) => Boolean(j.sourceUrl && j.sourceUrl.startsWith('http'))),
+          `All jobs returned for ${region} must have valid official URLs`
+        );
+      }
+
+      // Live leakage regression check: every returned job must genuinely match the searched country, its region, or Worldwide remote
+      for (const { countryQuery, expectedRe } of [
+        { countryQuery: 'Haïti', expectedRe: /\b(haiti|ayiti|caribbean|caraibes|americas|latam|worldwide|anywhere|global)\b/i },
+        { countryQuery: 'Sénégal', expectedRe: /\b(senegal|dakar|africa|afrique|worldwide|anywhere|global)\b/i },
+        { countryQuery: 'Brésil', expectedRe: /\b(brazil|bresil|brasil|latam|latin america|americas|worldwide|anywhere|global)\b/i },
+        { countryQuery: 'Japon', expectedRe: /\b(japan|japon|tokyo|asia|apac|worldwide|anywhere|global)\b/i },
+      ]) {
+        const res = await fetch('http://127.0.0.1:3000/api/jobs/feeds', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ query: '', country: countryQuery }),
+        });
+        assert.equal(res.status, 200);
+        const payload = (await res.json()) as { jobs?: Array<{ country?: string; city?: string }> };
+        assert.ok(Array.isArray(payload.jobs) && payload.jobs.length > 0, `Expected results for ${countryQuery}`);
+        for (const job of payload.jobs) {
+          const loc = `${job.country || ''} ${job.city || ''}`;
+          assert.ok(
+            expectedRe.test(loc),
+            `Geography leak detected for ${countryQuery}: returned "${job.country} / ${job.city}"`
+          );
+        }
+      }
+    });
+
+    // 24. Email/Password Registration + Mandatory 5-Digit Verification Code + Strict API Gate
+    let testAuthUserId = '';
+    await check('Email/Password auth hashes credentials with scrypt, enforces 5-digit confirmation code, and blocks unverified accounts on protected APIs', async () => {
+      // 24a. Confirm live dev server mounts /api/auth/* routes
+      const liveMe = await fetch('http://127.0.0.1:3000/api/auth/me');
+      assert.equal(liveMe.status, 401);
+      const liveBadLogin = await fetch('http://127.0.0.1:3000/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'nonexistent@jobfounds-test.invalid', password: 'WrongPassword123' }),
+      });
+      assert.equal(liveBadLogin.status, 401);
+      const liveShortPwd = await fetch('http://127.0.0.1:3000/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fullName: 'Test User', email: 'short@jobfounds-test.invalid', password: '123' }),
+      });
+      assert.equal(liveShortPwd.status, 400);
+
+      // 24b. Verify 5-digit code format (strictly 5 digits 10000-99999)
+      for (let i = 0; i < 20; i += 1) {
+        const sample = generateFiveDigitCode();
+        assert.match(sample, /^\d{5}$/, `Generated code must be strictly 5 digits: ${sample}`);
+      }
+
+      // 24c. Spin up an isolated Express app mounting the exact auth router + security middleware on port 0
+      registerAppTokenVerifier(verifyAppSessionToken);
+      const authApp = express();
+      authApp.use(express.json());
+      authApp.use('/api', attachFirebaseAuth);
+      authApp.use('/api', createAuthRouter());
+      authApp.get('/api/protected-workspace', requireFirebaseAuth, (req: any, res) => {
+        res.json({ ok: true, uid: req.authUser.uid, emailVerified: req.authUser.emailVerified });
+      });
+
+      const srv = await new Promise<http.Server>((resolve) => {
+        const s = authApp.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const addr = srv.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+      try {
+        const testEmail = `verify-test-${Date.now()}@jobfounds-test.invalid`;
+        const testPassword = 'StrongPassword#2026';
+
+        // Create account via scrypt & verify password hash is never plaintext
+        const { passwordHash, passwordSalt } = createPasswordCredentials(testPassword);
+        assert.notEqual(passwordHash, testPassword);
+        assert.ok(passwordHash.length >= 64 && passwordSalt.length >= 16);
+
+        const user = createAuthUserRecord({
+          email: testEmail,
+          fullName: 'Jean-Baptiste Test',
+          passwordHash,
+          passwordSalt,
+        });
+        testAuthUserId = user.uid;
+        assert.equal(user.emailVerified, false, 'New account MUST start unverified');
+        assert.equal(verifyPasswordCredentials(testPassword, user), true);
+        assert.equal(verifyPasswordCredentials('WrongPassword123', user), false);
+
+        // Issue hashed 5-digit code (verify stored hash is NOT plaintext code)
+        const issued = await issueAndSendFiveDigitCode(user, { skipEmailForTest: true });
+        assert.match(issued.codeForTest || '', /^\d{5}$/);
+        const activeCodeRow = getLatestActiveVerificationCode(user.uid);
+        assert.ok(activeCodeRow, 'Active verification code row must exist');
+        assert.notEqual(activeCodeRow!.codeHash, issued.codeForTest, '5-digit code must be hashed at rest');
+
+        // Wrong password -> 401
+        const badLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: testEmail, password: 'WrongPassword123' }),
+        });
+        assert.equal(badLoginRes.status, 401);
+
+        // Right password on unverified account -> verificationRequired=true + unverified token
+        const unverifiedLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: testEmail, password: testPassword }),
+        });
+        assert.equal(unverifiedLoginRes.status, 200);
+        const unverifiedLoginBody = (await unverifiedLoginRes.json()) as {
+          verificationRequired?: boolean;
+          token?: string;
+          user?: { emailVerified?: boolean };
+        };
+        assert.equal(unverifiedLoginBody.verificationRequired, true);
+        assert.equal(unverifiedLoginBody.user?.emailVerified, false);
+        assert.ok(unverifiedLoginBody.token);
+
+        // Unverified Bearer token MUST be rejected (403 EMAIL_NOT_VERIFIED) on protected workspace APIs
+        const blockedRes = await fetch(`${baseUrl}/api/protected-workspace`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${unverifiedLoginBody.token}` },
+        });
+        assert.equal(blockedRes.status, 403, 'Unverified account token MUST receive 403');
+        const blockedBody = (await blockedRes.json()) as { code?: string };
+        assert.equal(blockedBody.code, 'EMAIL_NOT_VERIFIED');
+
+        // Malformed code (4 digits) -> 400
+        const malformedRes = await fetch(`${baseUrl}/api/auth/verify-code`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${unverifiedLoginBody.token}`,
+          },
+          body: JSON.stringify({ email: testEmail, code: '1234' }),
+        });
+        assert.equal(malformedRes.status, 400);
+
+        // Wrong 5-digit code -> 400 & decrements remainingAttempts to 4
+        const wrongCode = issued.codeForTest === '12345' ? '54321' : '12345';
+        const wrongCodeRes = await fetch(`${baseUrl}/api/auth/verify-code`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${unverifiedLoginBody.token}`,
+          },
+          body: JSON.stringify({ email: testEmail, code: wrongCode }),
+        });
+        assert.equal(wrongCodeRes.status, 400);
+        const wrongCodeBody = (await wrongCodeRes.json()) as { remainingAttempts?: number };
+        assert.equal(wrongCodeBody.remainingAttempts, 4);
+        assert.equal(getAuthUserByEmail(testEmail)?.emailVerified, false);
+
+        // Valid 5-digit code -> 200 verified=true + unlocks protected workspace APIs
+        const okVerifyRes = await fetch(`${baseUrl}/api/auth/verify-code`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${unverifiedLoginBody.token}`,
+          },
+          body: JSON.stringify({ email: testEmail, code: issued.codeForTest }),
+        });
+        assert.equal(okVerifyRes.status, 200);
+        const okVerifyBody = (await okVerifyRes.json()) as {
+          verified?: boolean;
+          token?: string;
+          user?: { emailVerified?: boolean };
+        };
+        assert.equal(okVerifyBody.verified, true);
+        assert.equal(okVerifyBody.user?.emailVerified, true);
+        assert.ok(okVerifyBody.token);
+
+        const unlockedRes = await fetch(`${baseUrl}/api/protected-workspace`, {
+          method: 'GET',
+          headers: { Authorization: `Bearer ${okVerifyBody.token}` },
+        });
+        assert.equal(unlockedRes.status, 200, 'Verified account token must succeed on protected APIs');
+
+        // 5 wrong guesses lock the 5-digit code & prevent subsequent use even with the real code
+        const lockUser = createAuthUserRecord({
+          email: `lock-test-${Date.now()}@jobfounds-test.invalid`,
+          fullName: 'Lock Test',
+          passwordHash,
+          passwordSalt,
+        });
+        try {
+          const lockIssued = await issueAndSendFiveDigitCode(lockUser, { skipEmailForTest: true });
+          const badGuess = lockIssued.codeForTest === '99999' ? '11111' : '99999';
+          let lastResult: any = null;
+          for (let attempt = 0; attempt < 5; attempt += 1) {
+            lastResult = verifyFiveDigitCodeForUser(lockUser, badGuess);
+            assert.equal(lastResult.ok, false);
+          }
+          assert.equal(lastResult.code, 'CODE_LOCKED');
+          const afterLock = verifyFiveDigitCodeForUser(lockUser, lockIssued.codeForTest!);
+          assert.equal(afterLock.ok, false);
+          assert.equal(afterLock.code, 'NO_ACTIVE_CODE');
+        } finally {
+          deleteAuthUserByUid(lockUser.uid);
+        }
+
+        // Token verification sanity check
+        const verifiedTokenDirect = issueAppSessionToken(getAuthUserByEmail(testEmail)!);
+        const verifiedClaims = verifyAppSessionToken(verifiedTokenDirect);
+        assert.equal(verifiedClaims?.emailVerified, true);
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        if (testAuthUserId) {
+          deleteAuthUserByUid(testAuthUserId);
+          testAuthUserId = '';
+        }
+      }
+    });
+
+    // Clean recruiter test notifications
+    getEngineDb().prepare('DELETE FROM notifications WHERE uid = ?').run(testRecruiterUid);
   } finally {
     // Clean up synthetic test records so production SQLite stays clean
     const db = getEngineDb();
@@ -516,6 +1306,7 @@ async function runTests() {
     db.prepare('DELETE FROM notifications WHERE uid = ?').run(testUid);
     db.prepare('DELETE FROM candidate_subscriptions WHERE uid = ?').run(testUid);
     db.prepare('DELETE FROM crm_email_sync_events WHERE uid = ?').run(testUid);
+    db.prepare('DELETE FROM application_submissions WHERE user_id = ?').run(testUid);
     for (const jid of testJobIds) {
       db.prepare('DELETE FROM background_jobs WHERE id = ?').run(jid);
     }

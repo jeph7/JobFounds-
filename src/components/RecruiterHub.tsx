@@ -2,9 +2,14 @@ import { useEffect, useState } from 'react';
 import {
   ArrowUpRight,
   Building2,
+  CheckCircle2,
+  Download,
+  Inbox,
   Loader2,
   MessageSquare,
+  Paperclip,
   Plus,
+  RefreshCw,
   Search,
   Send,
   ShieldCheck,
@@ -13,16 +18,23 @@ import {
 } from 'lucide-react';
 import {
   AccountRole,
+  ApplicationSubmissionRecord,
   CompanyJobDoc,
   ContractType,
   ConversationDoc,
+  EmployerApplicationStatus,
   Lang,
   MessageDoc,
   PublicCandidateDoc,
   RecruiterFinderResult,
   WorkMode,
 } from '../types';
-import { findRecruiters } from '../utils/api';
+import {
+  downloadSubmissionAttachment,
+  fetchEmployerApplications,
+  findRecruiters,
+  respondToEmployerApplicationApi,
+} from '../utils/api';
 import { safeExternalUrl } from '../utils/safeUrl';
 import {
   closeCompanyJob,
@@ -60,7 +72,7 @@ export function RecruiterHub({
   onRequireSignIn,
   onNotify,
 }: RecruiterHubProps) {
-  const [subTab, setSubTab] = useState<'directory' | 'portal' | 'messages'>('directory');
+  const [subTab, setSubTab] = useState<'directory' | 'portal' | 'inbox' | 'messages'>('directory');
 
   // 1. Verified HR / Recruiter Finder
   const [finderCompany, setFinderCompany] = useState('');
@@ -82,6 +94,85 @@ export function RecruiterHub({
   const [jobSkills, setJobSkills] = useState('');
   const [jobDesc, setJobDesc] = useState('');
   const [publishing, setPublishing] = useState(false);
+
+  // 2b. Employer Received Direct Applications Inbox
+  const [receivedApps, setReceivedApps] = useState<ApplicationSubmissionRecord[]>([]);
+  const [inboxLoading, setInboxLoading] = useState(false);
+  const [inboxError, setInboxError] = useState<string | null>(null);
+  const [replyDrafts, setReplyDrafts] = useState<Record<string, string>>({});
+  const [statusDrafts, setStatusDrafts] = useState<Record<string, EmployerApplicationStatus>>({});
+  const [replySubmittingId, setReplySubmittingId] = useState<string | null>(null);
+
+  const loadEmployerInbox = async () => {
+    if (!uid) return;
+    setInboxLoading(true);
+    setInboxError(null);
+    try {
+      const res = await fetchEmployerApplications(60);
+      setReceivedApps(res.applications || []);
+    } catch (err) {
+      setInboxError(err instanceof Error ? err.message : 'Impossible de charger les candidatures reçues.');
+    } finally {
+      setInboxLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (uid) {
+      void loadEmployerInbox();
+    } else {
+      setReceivedApps([]);
+    }
+  }, [uid]);
+
+  const handleEmployerRespond = async (app: ApplicationSubmissionRecord) => {
+    if (!uid) {
+      onRequireSignIn();
+      return;
+    }
+    const replyMessage = (replyDrafts[app.id] || '').trim();
+    const status: EmployerApplicationStatus = statusDrafts[app.id] || app.employerStatus || 'under_review';
+    if (replyMessage.length < 2) {
+      setInboxError(lang === 'fr' ? 'Saisissez un message de réponse pour le candidat.' : 'Enter a reply message for the candidate.');
+      return;
+    }
+    setReplySubmittingId(app.id);
+    setInboxError(null);
+    try {
+      const res = await respondToEmployerApplicationApi(app.id, { status, replyMessage });
+      setReceivedApps((prev) => prev.map((item) => (item.id === app.id ? res.submission : item)));
+      setReplyDrafts((prev) => ({ ...prev, [app.id]: '' }));
+      // Mirror reply into Firestore direct conversation so candidate sees it in real time
+      try {
+        const convId = await createOrOpenConversation({
+          candidateId: app.userId,
+          recruiterId: uid,
+          candidateName: app.candidateName || app.candidateEmail || 'Candidat',
+          recruiterName: userDisplayName || app.companyName,
+          companyName: app.companyName,
+          jobTitle: app.roleTitle,
+        });
+        await sendConversationMessage({
+          conversationId: convId,
+          senderId: uid,
+          recipientId: app.userId,
+          senderName: userDisplayName || app.companyName,
+          body: `[Statut : ${status}]\n${replyMessage}`,
+        });
+      } catch {
+        // Non-blocking: SQLite reply + candidate notification already saved
+      }
+      onNotify(
+        lang === 'fr'
+          ? `Réponse envoyée à ${app.candidateName || 'candidat'} et synchronisée dans son suivi CRM.`
+          : `Reply sent to ${app.candidateName || 'candidate'} and synced to their CRM.`
+      );
+    } catch (err) {
+      setInboxError(err instanceof Error ? err.message : 'Échec de l’envoi de la réponse.');
+    } finally {
+      setReplySubmittingId(null);
+    }
+  };
 
   // 3. Direct Messaging
   const [activeConvId, setActiveConvId] = useState<string>(conversations[0]?.id ?? '');
@@ -139,8 +230,8 @@ export function RecruiterHub({
         companyName: jobCompany,
         companyWebsite: jobWebsite,
         title: jobTitle,
-        country: jobCountry || 'France',
-        city: jobCity || 'Paris',
+        country: jobCountry.trim() || 'International',
+        city: jobCity.trim() || 'Remote',
         workMode: jobWorkMode,
         contractType: jobContract,
         salaryRange: jobSalary || 'Non communiqué',
@@ -287,6 +378,20 @@ export function RecruiterHub({
             </button>
             <button
               type="button"
+              onClick={() => setSubTab('inbox')}
+              className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap ${
+                subTab === 'inbox'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <Inbox className="w-3.5 h-3.5" />
+              <span>
+                {lang === 'fr' ? 'Candidatures reçues' : 'Received Applications'} ({receivedApps.length})
+              </span>
+            </button>
+            <button
+              type="button"
               onClick={() => setSubTab('messages')}
               className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors inline-flex items-center gap-1.5 whitespace-nowrap ${
                 subTab === 'messages'
@@ -356,10 +461,30 @@ export function RecruiterHub({
             <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-6">
               <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-4 pb-5 border-b border-slate-200">
                 <div className="space-y-1.5">
-                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1 text-xs">
                     <VerificationStatusText status={finderResult.emailDomainStatus} lang={lang} />
+                    {finderResult.officialDomain && (
+                      <>
+                        <span className="text-slate-300" aria-hidden="true">·</span>
+                        <span className="font-mono text-slate-700">{finderResult.officialDomain}</span>
+                      </>
+                    )}
                     <span className="text-slate-300" aria-hidden="true">·</span>
-                    <span className="font-mono text-slate-700">{finderResult.officialDomain}</span>
+                    <span
+                      className={`px-2 py-0.5 rounded font-mono text-[11px] font-medium ${
+                        finderResult.domainMxVerified
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-amber-50 text-amber-800 border border-amber-200'
+                      }`}
+                    >
+                      {finderResult.domainMxVerified
+                        ? lang === 'fr'
+                          ? 'DNS MX vérifié'
+                          : 'DNS MX Verified'
+                        : lang === 'fr'
+                          ? 'DNS MX non confirmé'
+                          : 'DNS MX Unconfirmed'}
+                    </span>
                   </div>
                   <h2 className="font-display text-xl font-semibold text-slate-900">
                     {finderCompany}
@@ -379,39 +504,90 @@ export function RecruiterHub({
                 )}
               </div>
 
-              <div className="divide-y divide-slate-200">
-                {finderResult.contacts.map((c, idx) => (
-                  <div key={idx} className="py-4 flex flex-col md:flex-row md:items-start justify-between gap-4">
-                    <div className="space-y-1">
-                      <div className="text-sm font-semibold text-slate-900">
-                        {c.nameOrTitle}{' '}
-                        <span className="font-normal text-slate-500">— {c.role}</span>
+              {finderResult.contacts.length === 0 ? (
+                <div className="p-6 text-center text-xs text-slate-600 bg-slate-50 border border-dashed border-slate-200 rounded-lg space-y-1.5">
+                  <p className="font-semibold text-slate-800">
+                    {lang === 'fr'
+                      ? 'Aucun contact RH publiquement vérifiable trouvé pour cette entreprise.'
+                      : 'No publicly verifiable HR contact found for this company.'}
+                  </p>
+                  <p>
+                    {lang === 'fr'
+                      ? 'JOBFOUNDS n’invente jamais de nom ni d’adresse e-mail pour remplir l’annuaire. Utilisez directement le portail carrières officiel ci-dessus.'
+                      : 'JOBFOUNDS never fabricates contact names or emails to fill results. Please apply directly through the official careers portal above.'}
+                  </p>
+                </div>
+              ) : (
+                <div className="divide-y divide-slate-200">
+                  {finderResult.contacts.map((c, idx) => {
+                    const conf = c.confidenceLevel || (c.publicUrl ? 'probable' : 'unverified');
+                    const confStyle =
+                      conf === 'confirmed'
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        : conf === 'probable'
+                          ? 'bg-blue-50 text-blue-800 border-blue-200'
+                          : 'bg-amber-50 text-amber-800 border-amber-200';
+                    const confLabel =
+                      conf === 'confirmed'
+                        ? lang === 'fr'
+                          ? 'Contact vérifié (source publique)'
+                          : 'Verified (public source)'
+                        : conf === 'probable'
+                          ? lang === 'fr'
+                            ? 'Probable (à vérifier)'
+                            : 'Probable (verify)'
+                          : lang === 'fr'
+                            ? 'Non vérifié'
+                            : 'Unverified';
+                    return (
+                      <div key={idx} className="py-4 flex flex-col md:flex-row md:items-start justify-between gap-4">
+                        <div className="space-y-1.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-semibold text-slate-900">
+                              {c.nameOrTitle}{' '}
+                              <span className="font-normal text-slate-500">— {c.role}</span>
+                            </span>
+                            <span className={`px-2 py-0.5 text-[11px] font-medium rounded border ${confStyle}`}>
+                              {confLabel}
+                            </span>
+                          </div>
+                          <div className="text-xs text-slate-500 flex flex-wrap items-center gap-x-2">
+                            <span>{c.location}</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{c.channel}</span>
+                            {c.corporateEmail && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span className="font-mono text-jf-blue font-medium">
+                                  {c.corporateEmail}
+                                </span>
+                              </>
+                            )}
+                          </div>
+                          <p className="text-xs text-slate-600 pt-0.5">{c.verificationNote}</p>
+                          <p className="text-xs text-slate-800">
+                            <span className="font-semibold">
+                              {lang === 'fr' ? 'Angle d’approche : ' : 'Approach tip: '}
+                            </span>
+                            {c.outreachTip}
+                          </p>
+                        </div>
+                        {safeExternalUrl(c.publicUrl) && (
+                          <a
+                            href={safeExternalUrl(c.publicUrl)!}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="text-xs font-medium text-blue-700 hover:underline inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                          >
+                            <span>{lang === 'fr' ? 'Source officielle' : 'Official source'}</span>
+                            <ArrowUpRight className="w-3.5 h-3.5" />
+                          </a>
+                        )}
                       </div>
-                      <div className="text-xs text-slate-500">
-                        {c.location} · {c.channel}
-                      </div>
-                      <p className="text-xs text-slate-600 pt-1">{c.verificationNote}</p>
-                      <p className="text-xs text-slate-800">
-                        <span className="font-semibold">
-                          {lang === 'fr' ? 'Angle d’approche : ' : 'Approach tip: '}
-                        </span>
-                        {c.outreachTip}
-                      </p>
-                    </div>
-                    {safeExternalUrl(c.publicUrl) && (
-                      <a
-                        href={safeExternalUrl(c.publicUrl)!}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-xs font-medium text-blue-700 hover:underline inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-                      >
-                        <span>{lang === 'fr' ? 'Canal officiel' : 'Public channel'}</span>
-                        <ArrowUpRight className="w-3.5 h-3.5" />
-                      </a>
-                    )}
-                  </div>
-                ))}
-              </div>
+                    );
+                  })}
+                </div>
+              )}
             </section>
           )}
         </div>
@@ -652,6 +828,220 @@ export function RecruiterHub({
             </section>
           </div>
         </div>
+      )}
+
+      {/* TAB 2B: EMPLOYER DIRECT APPLICATIONS INBOX */}
+      {subTab === 'inbox' && (
+        <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-5">
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-slate-200">
+            <div>
+              <h2 className="text-base font-semibold text-slate-900">
+                {lang === 'fr'
+                  ? 'Candidatures directes reçues via JOBFOUNDS'
+                  : 'Direct Applications Received via JOBFOUNDS'}
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {lang === 'fr'
+                  ? 'Consultez les informations candidat, téléchargez les CV et documents joints, mettez à jour le statut et répondez directement.'
+                  : 'Review candidate details, download attached CVs/documents, update status, and reply directly.'}
+              </p>
+            </div>
+            {uid && (
+              <button
+                type="button"
+                onClick={() => void loadEmployerInbox()}
+                disabled={inboxLoading}
+                className="px-3 py-1.5 text-xs font-medium text-slate-700 border border-slate-200 rounded-lg hover:bg-slate-50 inline-flex items-center gap-1.5"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${inboxLoading ? 'animate-spin' : ''}`} />
+                <span>{lang === 'fr' ? 'Actualiser' : 'Refresh'}</span>
+              </button>
+            )}
+          </div>
+
+          {!uid ? (
+            <div className="p-8 text-center space-y-3">
+              <p className="text-sm text-slate-700">
+                {lang === 'fr'
+                  ? 'Connectez-vous à votre compte employeur pour consulter les candidatures directes reçues.'
+                  : 'Sign in with your employer account to inspect direct applications.'}
+              </p>
+              <button
+                type="button"
+                onClick={onRequireSignIn}
+                className="px-4 py-2 text-xs font-medium text-white bg-blue-700 hover:bg-blue-800 rounded-lg"
+              >
+                {lang === 'fr' ? 'Connexion Google' : 'Sign in with Google'}
+              </button>
+            </div>
+          ) : (
+            <>
+              {inboxError && (
+                <div role="alert" className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-700">
+                  {inboxError}
+                </div>
+              )}
+
+              {inboxLoading && receivedApps.length === 0 ? (
+                <div className="py-10 flex items-center justify-center gap-2 text-xs text-slate-500">
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  <span>{lang === 'fr' ? 'Chargement des candidatures…' : 'Loading applications…'}</span>
+                </div>
+              ) : receivedApps.length === 0 ? (
+                <div className="p-8 text-center text-xs text-slate-500 border border-dashed border-slate-200 rounded-lg">
+                  {lang === 'fr'
+                    ? 'Aucune candidature directe reçue pour le moment. Publiez une offre dans l’onglet Portail Entreprises pour recevoir des dossiers ici.'
+                    : 'No direct applications received yet. Publish an opening in the Employer Portal tab to receive dossiers here.'}
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  {receivedApps.map((app) => {
+                    const currentStatus = statusDrafts[app.id] || app.employerStatus || 'received';
+                    return (
+                      <article key={app.id} className="border border-slate-200 rounded-xl p-5 space-y-4">
+                        <div className="flex flex-wrap items-start justify-between gap-3">
+                          <div className="space-y-1">
+                            <div className="text-sm font-semibold text-slate-900">
+                              {app.candidateName || app.candidateEmail || 'Candidat'}{' '}
+                              <span className="font-normal text-slate-500">
+                                ({app.candidateEmail || 'e-mail vérifié'})
+                              </span>
+                            </div>
+                            <div className="text-xs text-slate-600">
+                              {lang === 'fr' ? 'Poste :' : 'Role:'}{' '}
+                              <span className="font-medium text-slate-900">{app.roleTitle}</span> ·{' '}
+                              {app.companyName} ·{' '}
+                              <span className="font-mono text-slate-500">
+                                {app.createdAt.slice(0, 16).replace('T', ' ')}
+                              </span>
+                            </div>
+                            {app.cvVersionName && (
+                              <div className="text-xs text-slate-500">
+                                CV : {app.cvVersionName}
+                              </div>
+                            )}
+                          </div>
+                          <span className="px-2.5 py-1 text-[11px] font-mono rounded-md border border-slate-200 bg-slate-50 text-slate-800">
+                            {app.employerStatus || 'received'}
+                          </span>
+                        </div>
+
+                        {/* Cover Letter */}
+                        <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-800 whitespace-pre-line max-h-48 overflow-y-auto">
+                          {app.coverLetterFull || app.coverLetterPreview}
+                        </div>
+
+                        {/* Downloadable Attachments */}
+                        {app.attachments.length > 0 && (
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-xs font-medium text-slate-600 inline-flex items-center gap-1">
+                              <Paperclip className="w-3.5 h-3.5" />
+                              {lang === 'fr' ? 'Documents joints :' : 'Attachments:'}
+                            </span>
+                            {app.attachments.map((att, idx) => (
+                              <button
+                                key={`${app.id}_att_${idx}`}
+                                type="button"
+                                onClick={() =>
+                                  void downloadSubmissionAttachment(app.id, idx, att.filename).catch((err) =>
+                                    setInboxError(err instanceof Error ? err.message : 'Download failed')
+                                  )
+                                }
+                                className="px-2.5 py-1 text-xs font-medium text-blue-700 bg-blue-50 hover:bg-blue-100 rounded-md inline-flex items-center gap-1.5"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>{att.filename}</span>
+                              </button>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Existing Employer Reply */}
+                        {app.employerReply && (
+                          <div className="p-3 bg-emerald-50/70 border border-emerald-200 rounded-lg text-xs text-emerald-950 space-y-1">
+                            <div className="font-semibold inline-flex items-center gap-1.5">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              <span>
+                                {lang === 'fr' ? 'Dernière réponse envoyée' : 'Last reply sent'}
+                                {app.employerRepliedAt
+                                  ? ` · ${app.employerRepliedAt.slice(0, 16).replace('T', ' ')}`
+                                  : ''}
+                              </span>
+                            </div>
+                            <p className="whitespace-pre-line">{app.employerReply}</p>
+                          </div>
+                        )}
+
+                        {/* Status Update & Reply Form */}
+                        <div className="pt-3 border-t border-slate-100 space-y-2.5">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <label className="text-xs font-medium text-slate-700">
+                              {lang === 'fr' ? 'Décision / Statut :' : 'Status:'}
+                            </label>
+                            <select
+                              value={currentStatus}
+                              onChange={(e) =>
+                                setStatusDrafts((prev) => ({
+                                  ...prev,
+                                  [app.id]: e.target.value as EmployerApplicationStatus,
+                                }))
+                              }
+                              className="px-2.5 py-1.5 text-xs border border-slate-200 rounded-lg bg-white"
+                            >
+                              <option value="under_review">
+                                {lang === 'fr' ? 'En cours d’examen' : 'Under Review'}
+                              </option>
+                              <option value="interview_scheduled">
+                                {lang === 'fr' ? 'Entretien proposé' : 'Interview Scheduled'}
+                              </option>
+                              <option value="offer_received">
+                                {lang === 'fr' ? 'Offre proposée' : 'Offer Extended'}
+                              </option>
+                              <option value="message_received">
+                                {lang === 'fr' ? 'Message / Question' : 'Message / Question'}
+                              </option>
+                              <option value="rejected">
+                                {lang === 'fr' ? 'Non retenu' : 'Rejected'}
+                              </option>
+                            </select>
+                          </div>
+                          <div className="flex flex-col sm:flex-row gap-2">
+                            <input
+                              type="text"
+                              value={replyDrafts[app.id] || ''}
+                              onChange={(e) =>
+                                setReplyDrafts((prev) => ({ ...prev, [app.id]: e.target.value }))
+                              }
+                              placeholder={
+                                lang === 'fr'
+                                  ? 'Répondre au candidat (ex. créneau d’entretien, demande de précisions…)'
+                                  : 'Reply to candidate (e.g. interview slot, follow-up question…)'
+                              }
+                              className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-700"
+                            />
+                            <button
+                              type="button"
+                              disabled={replySubmittingId === app.id}
+                              onClick={() => void handleEmployerRespond(app)}
+                              className="px-4 py-2 text-xs font-medium text-white bg-blue-700 hover:bg-blue-800 disabled:opacity-50 rounded-lg inline-flex items-center justify-center gap-1.5 whitespace-nowrap"
+                            >
+                              {replySubmittingId === app.id ? (
+                                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              ) : (
+                                <Send className="w-3.5 h-3.5" />
+                              )}
+                              <span>{lang === 'fr' ? 'Envoyer la réponse' : 'Send Reply'}</span>
+                            </button>
+                          </div>
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              )}
+            </>
+          )}
+        </section>
       )}
 
       {/* TAB 3: DIRECT MESSAGING */}

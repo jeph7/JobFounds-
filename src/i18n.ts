@@ -813,11 +813,11 @@ const PHRASE_TRANSLATIONS: Record<string, { es: string; de: string; pt: string; 
     pt: 'Compatibilidade indicativa com seu perfil',
     ar: 'التوافق التقديري مع ملفك الشخصي',
   },
-  '8-Dimension AI Match': {
-    es: 'Análisis IA de 8 dimensiones',
-    de: '8-Dimensionen-KI-Match',
-    pt: 'Análise IA de 8 dimensões',
-    ar: 'تحليل التوافق الذكي (8 معايير)',
+  '9-Dimension AI Match': {
+    es: 'Análisis IA de 9 criterios',
+    de: '9-Kriterien-KI-Match',
+    pt: 'Análise IA de 9 critérios',
+    ar: 'تحليل التوافق الذكي (9 معايير)',
   },
   'Location aligned': { es: 'Ubicación alineada', de: 'Standort passend', pt: 'Localização alinhada', ar: 'الموقع متوافق' },
   'Relocation required': { es: 'Movilidad internacional', de: 'Umzug erforderlich', pt: 'Mobilidade internacional', ar: 'يتطلب انتقالاً دولياً' },

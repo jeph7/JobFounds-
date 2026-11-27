@@ -135,8 +135,16 @@ export async function verifyFirebaseIdToken(token: string): Promise<VerifiedAuth
   }
 }
 
+type AppSessionVerifier = (token: string) => VerifiedAuthUser | null;
+let appSessionVerifier: AppSessionVerifier | null = null;
+
+export function registerAppTokenVerifier(fn: AppSessionVerifier): void {
+  appSessionVerifier = fn;
+}
+
 /**
- * Express middleware that verifies optional Firebase Bearer token and attaches req.authUser.
+ * Express middleware that verifies optional JOBFOUNDS session token or Firebase Bearer token
+ * and attaches req.authUser (preserving emailVerified for strict server-side gating).
  */
 export async function attachFirebaseAuth(
   req: AuthedRequest,
@@ -146,7 +154,12 @@ export async function attachFirebaseAuth(
   const authHeader = req.headers.authorization || '';
   if (authHeader.startsWith('Bearer ')) {
     const token = authHeader.slice(7).trim();
-    req.authUser = await verifyFirebaseIdToken(token);
+    const appUser = appSessionVerifier ? appSessionVerifier(token) : null;
+    if (appUser) {
+      req.authUser = appUser;
+    } else {
+      req.authUser = await verifyFirebaseIdToken(token);
+    }
   } else {
     req.authUser = null;
   }
@@ -285,14 +298,15 @@ export function requireFirebaseAuth(
 ): void {
   if (!req.authUser?.uid) {
     res.status(401).json({
-      error: 'Authentication required. Please sign in with Google to use this intelligence feature.',
+      error: 'Connexion requise : veuillez vous connecter à votre compte JOBFOUNDS.',
       code: 'AUTH_REQUIRED',
     });
     return;
   }
   if (!req.authUser.emailVerified) {
     res.status(403).json({
-      error: 'Verified email required to access protected JOBFOUNDS APIs.',
+      error:
+        'Votre adresse e-mail n’est pas encore confirmée. Saisissez le code à 5 chiffres reçu par e-mail pour activer votre compte.',
       code: 'EMAIL_NOT_VERIFIED',
     });
     return;

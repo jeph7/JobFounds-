@@ -21,11 +21,14 @@ import {
   initialHiddenOpportunities,
   initialJobs,
   initialWatchlist,
+  isLegacyDemoCv,
+  isLegacyDemoProfile,
 } from './data/initialData';
 import { isRtlLang, t } from './i18n';
 import { auth, signInWithGooglePopup, signOutUser } from './firebase';
 import {
   checkIsAdminUser,
+  createOrOpenConversation,
   deleteAllUserCloudData,
   deleteUserApplication,
   deleteUserCv,
@@ -34,6 +37,7 @@ import {
   saveUserApplication,
   saveUserCv,
   saveWatchlistItem,
+  sendConversationMessage,
   subscribeOpenCompanyJobs,
   subscribePublicCandidates,
   subscribeUserApplications,
@@ -43,11 +47,13 @@ import {
   syncPublicCandidateDirectory,
   updateUserAccount,
 } from './utils/firestoreService';
-import { fetchUserNotifications } from './utils/api';
+import type { ApplicationModalTarget } from './components/ApplicationSubmissionModal';
+import { AppAuthUser, fetchUserNotifications, setAppSessionToken } from './utils/api';
 import { MobileBottomNav, Sidebar, TopHeader } from './components/Sidebar';
 import { BrandLogo } from './components/ui';
 import { OfflineIndicator } from './components/PWAInstallButton';
 import { LandingPage } from './components/LandingPage';
+import { AuthModal, AuthModalMode } from './components/AuthModal';
 
 // Code-split workspace modules for fast initial paint and isolated vendor chunks
 const GlobalJobSearch = lazy(() =>
@@ -88,6 +94,11 @@ const AdminDashboard = lazy(() =>
 );
 const CompanyIntelModal = lazy(() =>
   import('./components/CompanyIntelModal').then((m) => ({ default: m.CompanyIntelModal }))
+);
+const ApplicationSubmissionModal = lazy(() =>
+  import('./components/ApplicationSubmissionModal').then((m) => ({
+    default: m.ApplicationSubmissionModal,
+  }))
 );
 
 const STORAGE_KEYS = {
@@ -144,8 +155,15 @@ export default function App() {
   const [activeTab, setActiveTab] = useState<WorkspaceTab>('home');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  // Firebase Auth, Admin & Cloud Account State
+  // Firebase Auth (Google), Email/Password + 5-Digit Verified Auth, Admin & Cloud Account State
   const [authUser, setAuthUser] = useState<User | null>(null);
+  const [passwordUser, setPasswordUser] = useState<AppAuthUser | null>(null);
+  const [authModalOpen, setAuthModalOpen] = useState(false);
+  const [authModalMode, setAuthModalMode] = useState<AuthModalMode>('register');
+  const [pendingNav, setPendingNav] = useState<{
+    tab: WorkspaceTab;
+    subTab?: 'tracker' | 'interview' | 'mobility';
+  } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [accountRole, setAccountRole] = useState<AccountRole>(() =>
     loadStored<AccountRole>(STORAGE_KEYS.role, 'candidate')
@@ -160,13 +178,15 @@ export default function App() {
   const [opportunities, setOpportunities] = useState<HiddenOpportunity[]>(
     initialHiddenOpportunities
   );
-  const [profile, setProfile] = useState<CandidateProfile>(() =>
-    loadStored<CandidateProfile>(STORAGE_KEYS.profile, initialCandidateProfile)
-  );
-  const [cvVersions, setCvVersions] = useState<CvDocument[]>(() =>
-    loadStored<CvDocument[]>(STORAGE_KEYS.cvs, initialCvDocuments)
-  );
-  const [activeCvId, setActiveCvId] = useState<string>(cvVersions[0]?.id ?? 'cv-master-v1');
+  const [profile, setProfile] = useState<CandidateProfile>(() => {
+    const stored = loadStored<CandidateProfile>(STORAGE_KEYS.profile, initialCandidateProfile);
+    return isLegacyDemoProfile(stored) ? initialCandidateProfile : stored;
+  });
+  const [cvVersions, setCvVersions] = useState<CvDocument[]>(() => {
+    const stored = loadStored<CvDocument[]>(STORAGE_KEYS.cvs, initialCvDocuments);
+    return Array.isArray(stored) ? stored.filter((cv) => !isLegacyDemoCv(cv)) : [];
+  });
+  const [activeCvId, setActiveCvId] = useState<string>(() => cvVersions[0]?.id ?? '');
   const [applications, setApplications] = useState<TrackedApplication[]>(() =>
     loadStored<TrackedApplication[]>(STORAGE_KEYS.apps, initialApplications)
   );
@@ -191,6 +211,8 @@ export default function App() {
     name: string;
     country?: string;
   } | null>(null);
+  const [applicationModalTarget, setApplicationModalTarget] =
+    useState<ApplicationModalTarget | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const seededRef = useRef<Record<string, boolean>>({});
@@ -298,24 +320,33 @@ export default function App() {
         setCompanyName(account.companyName || '');
         setCompanyWebsite(account.companyWebsite || '');
         if (account.profile) {
-          setProfile(account.profile);
+          const cleanProfile = isLegacyDemoProfile(account.profile)
+            ? { ...initialCandidateProfile, fullName: user.displayName || '' }
+            : {
+                ...account.profile,
+                fullName: account.profile.fullName || user.displayName || '',
+              };
+          setProfile(cleanProfile);
+        } else if (user.displayName && !profileRef.current.fullName) {
+          setProfile((prev) => ({ ...prev, fullName: user.displayName || prev.fullName }));
         }
 
         const unsubCvs = subscribeUserCvs(user.uid, (cloudCvs) => {
-          if (cloudCvs.length === 0 && !seededRef.current[`cvs_${user.uid}`]) {
+          const cleanCloudCvs = cloudCvs.filter((cv) => !isLegacyDemoCv(cv));
+          if (cleanCloudCvs.length === 0 && !seededRef.current[`cvs_${user.uid}`]) {
             seededRef.current[`cvs_${user.uid}`] = true;
-            const localCvs = cvVersionsRef.current;
-            localCvs.forEach((cv) => {
-              saveUserCv(user.uid, cv).catch(() => {});
-            });
-            return;
+            const localRealCvs = cvVersionsRef.current.filter((cv) => !isLegacyDemoCv(cv));
+            if (localRealCvs.length > 0) {
+              localRealCvs.forEach((cv) => {
+                saveUserCv(user.uid, cv).catch(() => {});
+              });
+              return;
+            }
           }
-          if (cloudCvs.length > 0) {
-            setCvVersions(cloudCvs);
-            setActiveCvId((curr) =>
-              cloudCvs.some((c) => c.id === curr) ? curr : cloudCvs[0].id
-            );
-          }
+          setCvVersions(cleanCloudCvs);
+          setActiveCvId((curr) =>
+            cleanCloudCvs.some((c) => c.id === curr) ? curr : cleanCloudCvs[0]?.id ?? ''
+          );
         });
 
         const unsubApps = subscribeUserApplications(user.uid, (cloudApps) => {
@@ -386,29 +417,119 @@ export default function App() {
     return serverUnreadNotifs + watchUnread + dueCount;
   }, [serverUnreadNotifs, watchlist, applications]);
 
+  // Unified Verified User Identity (MUST be email-verified to access the workspace)
+  const verifiedAccount = useMemo(() => {
+    if (authUser && authUser.emailVerified !== false) {
+      return {
+        uid: authUser.uid,
+        email: authUser.email || '',
+        displayName: authUser.displayName || profile.fullName || '',
+        provider: 'firebase' as const,
+      };
+    }
+    if (passwordUser && passwordUser.emailVerified) {
+      return {
+        uid: passwordUser.uid,
+        email: passwordUser.email,
+        displayName: passwordUser.fullName || profile.fullName || '',
+        provider: 'password' as const,
+      };
+    }
+    return null;
+  }, [authUser, passwordUser, profile.fullName]);
+
+  const isVerifiedSignedIn = Boolean(verifiedAccount);
+
+  const openAuthFlow = (
+    mode: AuthModalMode,
+    destination?: { tab: WorkspaceTab; subTab?: 'tracker' | 'interview' | 'mobility' }
+  ) => {
+    if (destination) {
+      setPendingNav(destination);
+    }
+    setAuthModalMode(mode);
+    setAuthModalOpen(true);
+  };
+
+  const applyPendingNavigation = (fallbackTab: WorkspaceTab = 'jobs') => {
+    const dest = pendingNav;
+    setPendingNav(null);
+    if (dest?.tab === 'career' && dest.subTab) {
+      setCareerSubTab(dest.subTab);
+      setCareerSubTabSeq((s) => s + 1);
+    }
+    setActiveTab(dest?.tab || fallbackTab);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
   // Auth Actions
-  const handleSignIn = async () => {
+  const handleOpenLoginModal = () => {
+    openAuthFlow('login');
+  };
+
+  const handleOpenRegisterModal = () => {
+    openAuthFlow('register');
+  };
+
+  const handleGoogleSignIn = async () => {
     try {
       await signInWithGooglePopup();
+      setAuthModalOpen(false);
       showNotice(
         lang === 'fr'
           ? 'Connecté à votre espace cloud JOBFOUNDS.'
           : 'Signed in to your JOBFOUNDS cloud workspace.'
       );
+      if (activeTab === 'home' || pendingNav) {
+        applyPendingNavigation('jobs');
+      }
     } catch (err) {
-      showNotice(
-        err instanceof Error ? err.message : 'Unable to complete Google sign-in.'
-      );
+      const msg = err instanceof Error ? err.message : 'Unable to complete Google sign-in.';
+      showNotice(msg);
+      throw err;
     }
+  };
+
+  const handlePasswordAuthenticated = (user: AppAuthUser, token: string) => {
+    setAppSessionToken(token);
+    setPasswordUser(user);
+    setIsAdmin(Boolean(user.isAdmin));
+    setAccountRole(user.accountRole);
+    if (user.fullName && !profile.fullName) {
+      setProfile((prev) => ({ ...prev, fullName: user.fullName }));
+    }
+    setAuthModalOpen(false);
+    fetchUserNotifications()
+      .then((res) => setServerUnreadNotifs(res.unreadCount || 0))
+      .catch(() => {});
+    showNotice(
+      lang === 'fr'
+        ? `Bienvenue ${user.fullName || user.email} ! Votre compte JOBFOUNDS est validé.`
+        : `Welcome ${user.fullName || user.email}! Your JOBFOUNDS account is verified.`
+    );
+    applyPendingNavigation('jobs');
+  };
+
+  const handlePasswordUnverified = (user: AppAuthUser, token: string) => {
+    setAppSessionToken(token);
+    setPasswordUser(user);
   };
 
   const handleSignOut = async () => {
     try {
-      await signOutUser();
+      setPasswordUser(null);
+      setAppSessionToken(null);
+      setIsAdmin(false);
+      setServerUnreadNotifs(0);
+      setPendingNav(null);
+      if (authUser) {
+        await signOutUser();
+      }
+      setActiveTab('home');
       showNotice(
         lang === 'fr'
-          ? 'Session cloud fermée (mode local actif).'
-          : 'Signed out (local mode active).'
+          ? 'Vous êtes déconnecté de votre espace JOBFOUNDS.'
+          : 'Signed out of your JOBFOUNDS workspace.'
       );
     } catch {
       // ignore
@@ -598,6 +719,10 @@ export default function App() {
   };
 
   const handleDeleteAllData = async () => {
+    setPasswordUser(null);
+    setAppSessionToken(null);
+    setIsAdmin(false);
+    setPendingNav(null);
     if (authUser) {
       await deleteAllUserCloudData(authUser.uid);
       await signOutUser();
@@ -611,12 +736,13 @@ export default function App() {
     });
     setProfile(initialCandidateProfile);
     setCvVersions(initialCvDocuments);
-    setActiveCvId(initialCvDocuments[0].id);
+    setActiveCvId('');
     setApplications(initialApplications);
     setWatchlist(initialWatchlist);
     setDiscoverable(false);
     setCompanyName('');
     setCompanyWebsite('');
+    setActiveTab('home');
     showNotice(
       lang === 'fr'
         ? 'Toutes vos données personnelles ont été effacées (RGPD).'
@@ -671,6 +797,12 @@ export default function App() {
     tab: WorkspaceTab,
     subTab?: 'tracker' | 'interview' | 'mobility'
   ) => {
+    if (!isVerifiedSignedIn) {
+      const nextMode: AuthModalMode =
+        passwordUser && !passwordUser.emailVerified ? 'verify' : 'register';
+      openAuthFlow(nextMode, { tab, subTab });
+      return;
+    }
     if (tab === 'career' && subTab) {
       setCareerSubTab(subTab);
       setCareerSubTabSeq((s) => s + 1);
@@ -681,6 +813,12 @@ export default function App() {
 
   const handleSelectPersonaFromHome = (role: AccountRole, targetTab: WorkspaceTab) => {
     handleChangeRole(role);
+    if (!isVerifiedSignedIn) {
+      const nextMode: AuthModalMode =
+        passwordUser && !passwordUser.emailVerified ? 'verify' : 'register';
+      openAuthFlow(nextMode, { tab: targetTab });
+      return;
+    }
     setActiveTab(targetTab);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
@@ -736,6 +874,42 @@ export default function App() {
     setActiveTab('verify');
   };
 
+  const handleSaveTailoredCv = (tailored: CvDocument) => {
+    const nextVersions = [tailored, ...cvVersions.filter((v) => v.id !== tailored.id)];
+    handleUpdateCvVersions(nextVersions);
+    setActiveCvId(tailored.id);
+    showNotice(
+      lang === 'fr'
+        ? `Version de CV adaptée enregistrée : ${tailored.versionName}`
+        : `Tailored CV version saved: ${tailored.versionName}`
+    );
+  };
+
+  const handleSendDirectEmployerMessage = async (params: {
+    recruiterId: string;
+    companyName: string;
+    roleTitle: string;
+    messageBody: string;
+  }): Promise<boolean> => {
+    if (!authUser) return false;
+    const convId = await createOrOpenConversation({
+      candidateId: authUser.uid,
+      recruiterId: params.recruiterId,
+      candidateName: authUser.displayName || profile.fullName || 'Candidate',
+      recruiterName: params.companyName,
+      companyName: params.companyName,
+      jobTitle: params.roleTitle,
+    });
+    await sendConversationMessage({
+      conversationId: convId,
+      senderId: authUser.uid,
+      recipientId: params.recruiterId,
+      senderName: authUser.displayName || profile.fullName || 'Candidate',
+      body: params.messageBody,
+    });
+    return true;
+  };
+
   const workspaceFallback = (
     <div className="bg-white border border-jf-border rounded-xl p-8 space-y-4 animate-pulse">
       <div className="h-6 bg-jf-soft rounded w-1/3" />
@@ -748,8 +922,9 @@ export default function App() {
     </div>
   );
 
-  // Full-Bleed Public Commercial Landing Page Mode (no SaaS dashboard sidebar)
-  if (activeTab === 'home') {
+  // Full-Bleed Public Commercial Landing Page Mode + Mandatory Auth/Verification Gate
+  // Unauthenticated or unverified users CANNOT enter the workspace until confirmed.
+  if (activeTab === 'home' || !isVerifiedSignedIn) {
     return (
       <>
         <LandingPage
@@ -758,10 +933,27 @@ export default function App() {
           jobsCount={mergedJobs.length}
           hiddenCount={opportunities.length}
           trackedCount={applications.length}
-          signedInEmail={authUser?.email ?? null}
+          signedInEmail={verifiedAccount?.email ?? null}
           onNavigate={handleNavigateFromLanding}
           onSelectPersona={handleSelectPersonaFromHome}
-          onSignIn={handleSignIn}
+          onSignIn={handleOpenLoginModal}
+          onStartRegister={handleOpenRegisterModal}
+        />
+
+        <AuthModal
+          open={authModalOpen || activeTab !== 'home'}
+          initialMode={authModalMode}
+          lang={lang}
+          pendingEmail={passwordUser && !passwordUser.emailVerified ? passwordUser.email : ''}
+          onClose={() => {
+            setAuthModalOpen(false);
+            if (!isVerifiedSignedIn && activeTab !== 'home') {
+              setActiveTab('home');
+            }
+          }}
+          onAuthenticated={handlePasswordAuthenticated}
+          onUnverifiedSession={handlePasswordUnverified}
+          onGoogleSignIn={handleGoogleSignIn}
         />
 
         <OfflineIndicator lang={lang} />
@@ -789,9 +981,9 @@ export default function App() {
         trackedCount={applications.length}
         alertCount={alertCount}
         messageCount={conversations.length}
-        signedInEmail={authUser?.email ?? null}
+        signedInEmail={verifiedAccount?.email ?? null}
         isAdmin={isAdmin}
-        onSignIn={handleSignIn}
+        onSignIn={handleOpenLoginModal}
         mobileOpen={mobileMenuOpen}
         onCloseMobile={() => setMobileMenuOpen(false)}
       />
@@ -834,6 +1026,7 @@ export default function App() {
                 onOpenCompanyIntel={(compName, compCountry) =>
                   setInspectedCompany({ name: compName, country: compCountry })
                 }
+                onOpenApplyModal={(target) => setApplicationModalTarget(target)}
                 externalSearchTrigger={0}
               />
             )}
@@ -841,9 +1034,10 @@ export default function App() {
             {activeTab === 'companies' && (
               <CompanyIntelligenceHub
                 lang={lang}
-                signedIn={Boolean(authUser)}
-                onRequireSignIn={handleSignIn}
+                signedIn={isVerifiedSignedIn}
+                onRequireSignIn={handleOpenLoginModal}
                 onCreateCrmApplication={handleSaveApplication}
+                onOpenApplyModal={(target) => setApplicationModalTarget(target)}
                 onNotify={showNotice}
               />
             )}
@@ -851,10 +1045,12 @@ export default function App() {
             {activeTab === 'hidden' && (
               <HiddenOpportunities
                 lang={lang}
+                signedIn={isVerifiedSignedIn}
                 opportunities={opportunities}
                 onOpportunitiesUpdate={setOpportunities}
                 profile={profile}
                 onTrackSpontaneous={handleTrackSpontaneous}
+                onOpenApplyModal={(target) => setApplicationModalTarget(target)}
               />
             )}
 
@@ -893,9 +1089,10 @@ export default function App() {
                 onSaveProfile={handleSaveProfile}
                 jobs={mergedJobs}
                 focusedJob={matchFocusedJob}
-                signedIn={Boolean(authUser)}
-                onRequireSignIn={handleSignIn}
+                signedIn={isVerifiedSignedIn}
+                onRequireSignIn={handleOpenLoginModal}
                 onCreateCrmApplication={handleSaveApplication}
+                onOpenApplyModal={(target) => setApplicationModalTarget(target)}
                 onNotify={showNotice}
               />
             )}
@@ -903,11 +1100,14 @@ export default function App() {
             {activeTab === 'career' && (
               <CareerHub
                 lang={lang}
+                signedIn={isVerifiedSignedIn}
+                onRequireSignIn={handleOpenLoginModal}
                 profile={profile}
                 cvVersions={cvVersions}
                 applications={applications}
                 onSaveApplication={handleSaveApplication}
                 onDeleteApplication={handleDeleteApplication}
+                onOpenApplyModal={(target) => setApplicationModalTarget(target)}
                 openAddFormSignal={0}
                 initialSubTab={careerSubTab}
                 subTabTrigger={careerSubTabSeq}
@@ -917,14 +1117,14 @@ export default function App() {
             {activeTab === 'watchlist' && (
               <WatchlistAlerts
                 lang={lang}
-                signedIn={Boolean(authUser)}
+                signedIn={isVerifiedSignedIn}
                 profile={profile}
                 watchlist={watchlist}
                 onSaveWatchItem={handleSaveWatchItem}
                 onDeleteWatchItem={handleDeleteWatchItem}
                 applications={applications}
                 onJumpToTracker={() => setActiveTab('career')}
-                onRequireSignIn={handleSignIn}
+                onRequireSignIn={handleOpenLoginModal}
                 onUnreadCountChange={setServerUnreadNotifs}
                 onNotify={showNotice}
               />
@@ -933,15 +1133,15 @@ export default function App() {
             {activeTab === 'recruiters' && (
               <RecruiterHub
                 lang={lang}
-                uid={authUser?.uid ?? null}
-                userDisplayName={authUser?.displayName || profile.fullName}
+                uid={verifiedAccount?.uid ?? null}
+                userDisplayName={verifiedAccount?.displayName || profile.fullName}
                 accountRole={accountRole}
                 companyNameDefault={companyName}
                 companyWebsiteDefault={companyWebsite}
                 companyJobs={companyJobs}
                 publicCandidates={publicCandidates}
                 conversations={conversations}
-                onRequireSignIn={handleSignIn}
+                onRequireSignIn={handleOpenLoginModal}
                 onNotify={showNotice}
               />
             )}
@@ -951,11 +1151,11 @@ export default function App() {
                 lang={lang}
                 onChangeLang={handleChangeLang}
                 user={
-                  authUser
+                  verifiedAccount
                     ? {
-                        uid: authUser.uid,
-                        email: authUser.email || '',
-                        displayName: authUser.displayName || profile.fullName,
+                        uid: verifiedAccount.uid,
+                        email: verifiedAccount.email,
+                        displayName: verifiedAccount.displayName || profile.fullName,
                       }
                     : null
                 }
@@ -968,7 +1168,7 @@ export default function App() {
                 companyName={companyName}
                 companyWebsite={companyWebsite}
                 onSaveCompanyInfo={handleSaveCompanyInfo}
-                onSignIn={handleSignIn}
+                onSignIn={handleOpenLoginModal}
                 onSignOut={handleSignOut}
                 onDeleteAllData={handleDeleteAllData}
                 exportPayload={{
@@ -984,7 +1184,7 @@ export default function App() {
               <AdminDashboard
                 lang={lang}
                 isAdmin={isAdmin}
-                adminEmail={authUser?.email ?? null}
+                adminEmail={verifiedAccount?.email ?? null}
                 onNotify={showNotice}
               />
             )}
@@ -1022,6 +1222,34 @@ export default function App() {
             onClose={() => setInspectedCompany(null)}
             onAddToWatchlist={handleAddCompanyToWatchlist}
             onVerifyCompany={handleVerifyCompanyFromModal}
+          />
+        </Suspense>
+      )}
+
+      {applicationModalTarget && (
+        <Suspense fallback={null}>
+          <ApplicationSubmissionModal
+            target={applicationModalTarget}
+            lang={lang}
+            profile={profile}
+            cvVersions={cvVersions}
+            signedIn={isVerifiedSignedIn}
+            onRequireSignIn={handleOpenLoginModal}
+            onSaveTailoredCv={handleSaveTailoredCv}
+            onApplicationRecorded={(recordedApp) => {
+              handleSaveApplication(recordedApp);
+              showNotice(
+                recordedApp.stage === 'Application Sent'
+                  ? lang === 'fr'
+                    ? `Candidature enregistrée comme envoyée pour ${recordedApp.company}.`
+                    : `Application recorded as sent for ${recordedApp.company}.`
+                  : lang === 'fr'
+                    ? `Candidature enregistrée dans votre suivi CRM (${recordedApp.company}).`
+                    : `Application tracked in your CRM (${recordedApp.company}).`
+              );
+            }}
+            onSendDirectEmployerMessage={handleSendDirectEmployerMessage}
+            onClose={() => setApplicationModalTarget(null)}
           />
         </Suspense>
       )}

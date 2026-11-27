@@ -155,6 +155,7 @@ export function WatchlistAlerts({
           : 'Alert preferences saved (active even when disconnected).'
       );
       setShowPrefs(false);
+      void loadNotifications();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to save preferences.');
     } finally {
@@ -436,6 +437,59 @@ export function WatchlistAlerts({
             </div>
           </form>
         )}
+      </section>
+
+      {/* Google Auth & Notification Permissions Status Strip */}
+      <section className="bg-white border border-jf-border rounded-xl p-4 grid grid-cols-1 md:grid-cols-3 gap-3 text-xs">
+        <div className="p-3 rounded-lg bg-jf-ice/70 border border-jf-border space-y-1">
+          <div className="font-semibold text-jf-navy flex items-center justify-between gap-2">
+            <span>{lang === 'fr' ? 'Compte Google / Firebase' : 'Google / Firebase Account'}</span>
+            <span
+              className={`font-mono text-[11px] px-1.5 py-0.5 rounded ${
+                signedIn
+                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                  : 'bg-amber-50 text-amber-800 border border-amber-200'
+              }`}
+            >
+              {signedIn ? (lang === 'fr' ? 'Connecté' : 'Connected') : lang === 'fr' ? 'Requis' : 'Required'}
+            </span>
+          </div>
+          <p className="text-slate-600 leading-snug">
+            {lang === 'fr'
+              ? 'Requis pour persister vos notifications serveur, préférences hors ligne, réponses employeurs et synchronisation CRM.'
+              : 'Required to persist server notifications, offline preferences, employer replies, and CRM sync.'}
+          </p>
+        </div>
+        <div className="p-3 rounded-lg bg-jf-ice/70 border border-jf-border space-y-1">
+          <div className="font-semibold text-jf-navy flex items-center justify-between gap-2">
+            <span>{lang === 'fr' ? 'Canaux de réception' : 'Delivery Channels'}</span>
+            <span className="font-mono text-[11px] text-jf-blue">
+              Push: {pushStatus}
+            </span>
+          </div>
+          <p className="text-slate-600 leading-snug">
+            {lang === 'fr'
+              ? `In-App actif · E-mail serveur : ${emailDeliveryAvailable ? 'Resend actif' : 'configuration Resend serveur requise'}.`
+              : `In-App active · Server email: ${emailDeliveryAvailable ? 'Resend active' : 'server Resend config required'}.`}
+          </p>
+        </div>
+        <div className="p-3 rounded-lg bg-jf-ice/70 border border-jf-border space-y-1">
+          <div className="font-semibold text-jf-navy flex items-center justify-between gap-2">
+            <span>{lang === 'fr' ? 'Synchronisation Gmail (OAuth)' : 'Gmail Sync (OAuth)'}</span>
+            <button
+              type="button"
+              onClick={onJumpToTracker}
+              className="text-[11px] font-semibold text-jf-blue hover:underline"
+            >
+              {lang === 'fr' ? 'Configurer dans CRM' : 'Configure in CRM'}
+            </button>
+          </div>
+          <p className="text-slate-600 leading-snug">
+            {lang === 'fr'
+              ? 'Autorisation Gmail lecture seule séparée (depuis le CRM) pour classer automatiquement les réponses recruteurs et déclencher une notification.'
+              : 'Separate read-only Gmail permission (in CRM) to classify recruiter replies and trigger notifications.'}
+          </p>
+        </div>
       </section>
 
       {error && (

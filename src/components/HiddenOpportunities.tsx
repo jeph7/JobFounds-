@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import {
   ArrowUpRight,
   Check,
@@ -15,29 +15,49 @@ import {
   GroundingSource,
   HiddenOpportunity,
   Lang,
+  NeedClassification,
   OpportunityClassification,
   OutreachDraft,
 } from '../types';
 import { t } from '../i18n';
-import { discoverHiddenOpportunities, generateOutreach } from '../utils/api';
+import {
+  discoverHiddenOpportunities,
+  fetchIntelligenceCompanies,
+  fetchIntelligenceContacts,
+  fetchIntelligenceSignals,
+  generateOutreach,
+} from '../utils/api';
 import { safeExternalUrl } from '../utils/safeUrl';
 import { ClassificationText } from './StatusText';
 import { JfProgressBar } from './ui';
+import type { ApplicationModalTarget } from './ApplicationSubmissionModal';
 
 interface HiddenOpportunitiesProps {
   lang: Lang;
+  signedIn?: boolean;
   opportunities: HiddenOpportunity[];
   onOpportunitiesUpdate: (items: HiddenOpportunity[]) => void;
   profile: CandidateProfile;
   onTrackSpontaneous: (opp: HiddenOpportunity) => void;
+  onOpenApplyModal?: (target: ApplicationModalTarget) => void;
 }
+
+type EnrichedHiddenOpportunity = HiddenOpportunity & {
+  companyId?: string;
+  needClassification?: NeedClassification;
+  inferredSkills?: string[];
+  corporateEmail?: string;
+  contactRole?: string;
+};
 
 export function HiddenOpportunities({
   lang,
+  signedIn = false,
   opportunities,
   onOpportunitiesUpdate,
   profile,
   onTrackSpontaneous,
+  onOpenApplyModal,
 }: HiddenOpportunitiesProps) {
   const tr = t(lang);
 
@@ -60,8 +80,99 @@ export function HiddenOpportunities({
   const [outreachDraft, setOutreachDraft] = useState<OutreachDraft | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
+  const [serverSignals, setServerSignals] = useState<EnrichedHiddenOpportunity[]>([]);
+
+  useEffect(() => {
+    if (!signedIn) return;
+    let active = true;
+    Promise.all([
+      fetchIntelligenceSignals().catch(() => ({ signals: [] })),
+      fetchIntelligenceCompanies({ limit: 80 }).catch(() => ({ companies: [] })),
+      fetchIntelligenceContacts().catch(() => ({ contacts: [] })),
+    ]).then(([sigRes, compRes, contactRes]) => {
+      if (!active) return;
+      const compMap = new Map(compRes.companies.map((c) => [c.id, c]));
+      const contactByCompany = new Map(
+        contactRes.contacts.map((c) => [c.companyId, c])
+      );
+      const mapped: EnrichedHiddenOpportunity[] = sigRes.signals
+        .filter((s) => s.classification !== 'confirmed_job')
+        .map((sig) => {
+          const comp = compMap.get(sig.companyId);
+          const contact = contactByCompany.get(sig.companyId);
+          const uiClass: OpportunityClassification =
+            sig.classification === 'confirmed_hiring_need'
+              ? 'Active Hiring Signal'
+              : 'Potential Hiring Opportunity';
+          return {
+            id: `srv_sig_${sig.id}`,
+            companyId: sig.companyId,
+            needClassification: sig.classification,
+            company: comp?.officialName || sig.companyId,
+            sector: comp?.sector || 'Technology',
+            location: comp?.location || comp?.country || 'International',
+            country: comp?.country || 'International',
+            classification: uiClass,
+            signalType: sig.signalType,
+            detectionReason: sig.title,
+            signalEvidence: sig.evidenceText || sig.summary,
+            potentialRoles:
+              sig.inferredRoles.length > 0
+                ? sig.inferredRoles
+                : [`${comp?.sector || 'International'} Specialist`],
+            inferredSkills: comp?.frequentSkills || [],
+            confidenceScore: Math.round((sig.reliabilityScore + sig.relevanceScore) / 2),
+            confidenceJustification:
+              lang === 'fr'
+                ? `Fiabilité source ${sig.reliabilityScore}% · Pertinence ${sig.relevanceScore}% (base surveillée)`
+                : `Source reliability ${sig.reliabilityScore}% · Relevance ${sig.relevanceScore}% (monitored DB)`,
+            sourceName: sig.sourceName,
+            sourceUrl: sig.sourceUrl || comp?.careersUrl || comp?.officialWebsite || '',
+            detectedDate: sig.detectedDate || new Date().toISOString().slice(0, 10),
+            corporateEmail: contact?.corporateEmail || '',
+            contactRole: contact?.roleTitle || '',
+            spontaneousOutreachAngle: sig.summary || sig.title,
+            professionalContact: {
+              nameOrDepartment:
+                contact?.fullName ||
+                (lang === 'fr'
+                  ? 'Équipe Recrutement / Carrières officielles'
+                  : 'Official Recruiting / Careers Team'),
+              channel:
+                contact?.corporateEmail ||
+                contact?.contactChannel ||
+                (comp?.careersUrl
+                  ? lang === 'fr'
+                    ? 'Portail carrières officiel'
+                    : 'Official careers portal'
+                  : lang === 'fr'
+                    ? 'À vérifier dans l’assistant d’envoi'
+                    : 'Verify in application assistant'),
+              url: contact?.publicUrl || comp?.careersUrl || comp?.officialWebsite || '',
+            },
+          };
+        });
+      setServerSignals(mapped);
+    });
+    return () => {
+      active = false;
+    };
+  }, [signedIn, lang]);
+
+  const combinedOpportunities: EnrichedHiddenOpportunity[] = useMemo(() => {
+    const seen = new Set<string>();
+    const out: EnrichedHiddenOpportunity[] = [];
+    for (const item of [...serverSignals, ...opportunities]) {
+      const key = `${item.company.toLowerCase()}::${item.detectionReason.toLowerCase().slice(0, 40)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+    return out;
+  }, [serverSignals, opportunities]);
+
   const filtered = useMemo(() => {
-    return opportunities.filter((item) => {
+    return combinedOpportunities.filter((item) => {
       if (filterClass !== 'ALL' && item.classification !== filterClass) return false;
       if (sector && !item.sector.toLowerCase().includes(sector.toLowerCase())) return false;
       if (country && !item.country.toLowerCase().includes(country.toLowerCase())) return false;
@@ -74,17 +185,19 @@ export function HiddenOpportunities({
       }
       return true;
     });
-  }, [opportunities, filterClass, sector, country, city, companyQuery]);
+  }, [combinedOpportunities, filterClass, sector, country, city, companyQuery]);
 
   const counts = useMemo(() => {
     return {
-      all: opportunities.length,
-      confirmed: opportunities.filter((o) => o.classification === 'Confirmed Job').length,
-      active: opportunities.filter((o) => o.classification === 'Active Hiring Signal').length,
-      potential: opportunities.filter((o) => o.classification === 'Potential Hiring Opportunity')
+      all: combinedOpportunities.length,
+      confirmed: combinedOpportunities.filter((o) => o.classification === 'Confirmed Job').length,
+      active: combinedOpportunities.filter((o) => o.classification === 'Active Hiring Signal')
         .length,
+      potential: combinedOpportunities.filter(
+        (o) => o.classification === 'Potential Hiring Opportunity'
+      ).length,
     };
-  }, [opportunities]);
+  }, [combinedOpportunities]);
 
   const handleDiscover = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -111,7 +224,40 @@ export function HiddenOpportunities({
     }
   };
 
-  const handleOpenOutreach = async (opp: HiddenOpportunity) => {
+  const handleOpenOutreach = async (opp: EnrichedHiddenOpportunity) => {
+    if (onOpenApplyModal) {
+      const mappedClass: NeedClassification =
+        opp.needClassification ||
+        (opp.classification === 'Confirmed Job'
+          ? 'confirmed_job'
+          : opp.classification === 'Active Hiring Signal'
+            ? 'probable_hiring_signal'
+            : 'potential_opportunity');
+      onOpenApplyModal({
+        companyId: opp.companyId,
+        companyName: opp.company,
+        roleTitle: opp.potentialRoles[0] || profile.currentTitle,
+        location: opp.location || opp.country || 'International',
+        sector: opp.sector,
+        opportunityType:
+          opp.classification === 'Confirmed Job' ? 'published_job' : 'hidden_opportunity',
+        classification: mappedClass,
+        officialUrl: opp.professionalContact.url || opp.sourceUrl,
+        sourceName: opp.sourceName,
+        publishedDate: opp.detectedDate,
+        inferredSkills: opp.inferredSkills && opp.inferredSkills.length > 0
+          ? opp.inferredSkills
+          : opp.potentialRoles,
+        signalReason: opp.detectionReason,
+        signalEvidence: opp.signalEvidence,
+        recommendedContactName: opp.professionalContact.nameOrDepartment,
+        recommendedContactRole: opp.contactRole || opp.professionalContact.channel,
+        recommendedContactEmail: opp.corporateEmail || '',
+        recommendedContactUrl: opp.professionalContact.url,
+      });
+      return;
+    }
+
     setActiveOutreachOpp(opp);
     setOutreachDraft(null);
     setOutreachError(null);

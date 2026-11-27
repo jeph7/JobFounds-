@@ -6,6 +6,7 @@ import {
   Info,
   Loader2,
   PlusCircle,
+  Send,
   SlidersHorizontal,
   UserCheck,
 } from 'lucide-react';
@@ -23,6 +24,7 @@ import {
 import { computeBaselineMatch } from '../data/initialData';
 import { computeIntelligenceMatches, evaluateSmartMatch } from '../utils/api';
 import { safeExternalUrl } from '../utils/safeUrl';
+import type { ApplicationModalTarget } from './ApplicationSubmissionModal';
 
 interface SmartMatchingProps {
   lang: Lang;
@@ -33,6 +35,7 @@ interface SmartMatchingProps {
   signedIn?: boolean;
   onRequireSignIn?: () => void;
   onCreateCrmApplication?: (app: TrackedApplication) => void;
+  onOpenApplyModal?: (target: ApplicationModalTarget) => void;
   onNotify?: (msg: string) => void;
 }
 
@@ -70,6 +73,7 @@ export function SmartMatching({
   signedIn = false,
   onRequireSignIn,
   onCreateCrmApplication,
+  onOpenApplyModal,
   onNotify,
 }: SmartMatchingProps) {
   const [draft, setDraft] = useState<CandidateProfile>(profile);
@@ -518,7 +522,7 @@ export function SmartMatching({
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
                 <span>
-                  {lang === 'fr' ? 'Audit IA 8 critères (1 offre)' : '8-Criteria AI Audit (1 Job)'}
+                  {lang === 'fr' ? 'Audit IA 9 critères (1 offre)' : '9-Criteria AI Audit (1 Job)'}
                 </span>
               </button>
             </div>
@@ -638,20 +642,42 @@ export function SmartMatching({
 
                         <p className="text-xs text-slate-700 leading-relaxed">{item.explanation}</p>
 
-                        {/* 5-Dimension Breakdown */}
-                        <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 text-[11px] font-mono tabular-nums">
+                        {/* 9-Dimension Breakdown */}
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-[11px] font-mono tabular-nums">
                           {[
                             [lang === 'fr' ? 'Compétences' : 'Skills', item.breakdown.skills],
                             [lang === 'fr' ? 'Expérience' : 'Exp.', item.breakdown.experience],
-                            [lang === 'fr' ? 'Mobilité' : 'Mobility', item.breakdown.locationAndMobility],
+                            [
+                              lang === 'fr' ? 'Formation' : 'Education',
+                              item.breakdown.education ?? item.breakdown.experience,
+                            ],
                             [lang === 'fr' ? 'Langues' : 'Lang.', item.breakdown.languages],
-                            [lang === 'fr' ? 'Secteur' : 'Sector', item.breakdown.sectorAndRole],
+                            [
+                              lang === 'fr' ? 'Localisation' : 'Location',
+                              item.breakdown.locationAndMobility,
+                            ],
+                            [
+                              lang === 'fr' ? 'Visa / Droit' : 'Work Auth',
+                              item.breakdown.workAuthorization ?? 70,
+                            ],
+                            [
+                              lang === 'fr' ? 'Disponibilité' : 'Availability',
+                              item.breakdown.availability ?? 75,
+                            ],
+                            [
+                              lang === 'fr' ? 'Salaire' : 'Salary',
+                              item.breakdown.salary ?? 70,
+                            ],
+                            [
+                              lang === 'fr' ? 'Fiabilité source' : 'Source Reliability',
+                              item.breakdown.signalReliability ?? item.breakdown.sectorAndRole,
+                            ],
                           ].map(([lbl, val]) => (
                             <div
                               key={String(lbl)}
                               className="px-2.5 py-1.5 rounded-lg bg-jf-ice border border-jf-border flex items-center justify-between"
                             >
-                              <span className="text-slate-500 font-sans">{lbl}</span>
+                              <span className="text-slate-500 font-sans truncate pr-1">{lbl}</span>
                               <span className="font-semibold text-jf-navy">{val}%</span>
                             </div>
                           ))}
@@ -705,7 +731,7 @@ export function SmartMatching({
                             })}
                           </div>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
                             {applyHref && (
                               <a
                                 href={applyHref}
@@ -716,6 +742,45 @@ export function SmartMatching({
                                 <span>{lang === 'fr' ? 'Ouvrir' : 'Open'}</span>
                                 <ArrowUpRight className="w-3 h-3" />
                               </a>
+                            )}
+                            {onOpenApplyModal && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  onOpenApplyModal({
+                                    companyId: item.companyId,
+                                    companyName: item.companyName,
+                                    roleTitle: item.title,
+                                    location: item.location || item.country || 'International',
+                                    opportunityType:
+                                      item.classification === 'confirmed_job'
+                                        ? 'published_job'
+                                        : 'hidden_opportunity',
+                                    classification: item.classification,
+                                    officialUrl: item.applyUrl || item.proofs[0]?.url || '',
+                                    sourceName: item.proofs[0]?.label || item.companyName,
+                                    inferredSkills: [...item.matchedSkills, ...item.missingSkills],
+                                    signalReason:
+                                      item.classification !== 'confirmed_job' ? item.explanation : undefined,
+                                    recommendedContactName: item.recommendedContact?.fullName,
+                                    recommendedContactRole: item.recommendedContact?.roleTitle,
+                                    recommendedContactEmail: item.recommendedContact?.corporateEmail,
+                                    recommendedContactUrl: item.recommendedContact?.publicUrl,
+                                  })
+                                }
+                                className="px-3 py-1.5 text-xs font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover rounded-lg inline-flex items-center gap-1.5"
+                              >
+                                <Send className="w-3.5 h-3.5" />
+                                <span>
+                                  {item.classification === 'confirmed_job'
+                                    ? lang === 'fr'
+                                      ? 'Postuler'
+                                      : 'Apply'
+                                    : lang === 'fr'
+                                      ? 'Candidature spontanée'
+                                      : 'Spontaneous Apply'}
+                                </span>
+                              </button>
                             )}
                             {onCreateCrmApplication && (
                               <button
@@ -737,12 +802,14 @@ export function SmartMatching({
             </div>
           )}
 
-          {/* MODE 2: SINGLE JOB 8-DIMENSION AI AUDIT */}
+          {/* MODE 2: SINGLE JOB 9-CRITERIA AI AUDIT */}
           {matchMode === 'single_job' && (
             <div className="space-y-6">
               <div className="space-y-3">
                 <h2 className="text-sm font-semibold text-jf-navy">
-                  {lang === 'fr' ? 'Évaluer la compatibilité avec une offre' : 'Evaluate Job Compatibility'}
+                  {lang === 'fr'
+                    ? 'Évaluer la compatibilité sur 9 critères avec une offre'
+                    : 'Evaluate 9-Criteria Job Compatibility'}
                 </h2>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <select
@@ -753,14 +820,22 @@ export function SmartMatching({
                     }}
                     className="flex-1 px-3 py-2 text-sm border border-jf-border rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-jf-blue"
                   >
-                    {jobs.map((job) => {
-                      const base = computeBaselineMatch(draft, job);
-                      return (
-                        <option key={job.id} value={job.id}>
-                          [{base.score}%] {job.company} — {job.title} ({job.city})
-                        </option>
-                      );
-                    })}
+                    {jobs.length === 0 ? (
+                      <option value="">
+                        {lang === 'fr'
+                          ? 'Aucune offre chargée — lancez une recherche d’emplois'
+                          : 'No listings loaded — run a job search first'}
+                      </option>
+                    ) : (
+                      jobs.map((job) => {
+                        const base = computeBaselineMatch(draft, job);
+                        return (
+                          <option key={job.id} value={job.id}>
+                            [{base.score}%] {job.company} — {job.title} ({job.city})
+                          </option>
+                        );
+                      })
+                    )}
                   </select>
                   <button
                     type="button"
@@ -774,7 +849,7 @@ export function SmartMatching({
                       <SlidersHorizontal className="w-4 h-4" />
                     )}
                     <span>
-                      {lang === 'fr' ? 'Expliquer la compatibilité IA' : 'Explain 8-Criteria Fit'}
+                      {lang === 'fr' ? 'Audit IA (9 critères)' : 'Explain 9-Criteria Fit'}
                     </span>
                   </button>
                 </div>
@@ -873,45 +948,77 @@ export function SmartMatching({
                 <div className="space-y-3">
                   <div className="text-xs text-slate-500">
                     {lang === 'fr'
-                      ? 'Classement indicatif rapide sur vos offres actives — cliquez sur « Expliquer la compatibilité IA » pour l’audit détaillé sur 8 critères.'
-                      : 'Quick indicative ranking across active listings — click "Explain 8-Criteria Fit" for a full AI breakdown.'}
+                      ? 'Classement indicatif rapide sur les 9 critères officiels — cliquez sur « Audit IA (9 critères) » pour l’évaluation détaillée avec explications.'
+                      : 'Quick indicative ranking across all 9 official criteria — click "Explain 9-Criteria Fit" for a full AI breakdown.'}
                   </div>
-                  <div className="divide-y divide-jf-border border border-jf-border rounded-lg">
-                    {jobs.map((job) => {
-                      const base = computeBaselineMatch(draft, job);
-                      return (
-                        <div
-                          key={job.id}
-                          className="p-4 flex items-center justify-between gap-4 hover:bg-jf-ice/50"
-                        >
-                          <div className="min-w-0">
-                            <div className="text-sm font-semibold text-jf-navy truncate">
-                              {job.title}
+                  {jobs.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-500 border border-dashed border-jf-border rounded-lg">
+                      {lang === 'fr'
+                        ? 'Aucune offre chargée dans votre session. Ouvrez « Recherche d’Emplois » pour récupérer des offres réelles.'
+                        : 'No job listings loaded yet. Open "Global Job Search" to fetch real openings.'}
+                    </div>
+                  ) : (
+                    <div className="divide-y divide-jf-border border border-jf-border rounded-lg">
+                      {jobs.map((job) => {
+                        const base = computeBaselineMatch(draft, job);
+                        const bd = base.breakdown;
+                        return (
+                          <div
+                            key={job.id}
+                            className="p-4 space-y-2.5 hover:bg-jf-ice/50"
+                          >
+                            <div className="flex items-center justify-between gap-4">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-jf-navy truncate">
+                                  {job.title}
+                                </div>
+                                <div className="text-xs text-slate-500 mt-0.5">
+                                  {job.company} · {job.city}, {job.country} · {lang === 'fr' ? 'Compétences' : 'Skills'}{' '}
+                                  <span className="font-mono tabular-nums">{base.skillsRatio}</span>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-4 shrink-0">
+                                <span className="font-mono text-sm font-semibold tabular-nums text-jf-blue">
+                                  {base.score}%
+                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setSelectedJobId(job.id);
+                                    setMatchReport(null);
+                                  }}
+                                  className="text-xs font-medium text-jf-dark hover:text-jf-blue hover:underline whitespace-nowrap"
+                                >
+                                  {lang === 'fr' ? 'Sélectionner' : 'Select'}
+                                </button>
+                              </div>
                             </div>
-                            <div className="text-xs text-slate-500 mt-0.5">
-                              {job.company} · {job.city}, {job.country} · {lang === 'fr' ? 'Compétences' : 'Skills'}{' '}
-                              <span className="font-mono tabular-nums">{base.skillsRatio}</span>
+                            <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5 text-[10px] font-mono tabular-nums">
+                              {[
+                                [lang === 'fr' ? 'Compétences' : 'Skills', bd.skills],
+                                [lang === 'fr' ? 'Expérience' : 'Exp.', bd.experience],
+                                [lang === 'fr' ? 'Formation' : 'Educ.', bd.education],
+                                [lang === 'fr' ? 'Langues' : 'Lang.', bd.languages],
+                                [lang === 'fr' ? 'Localisation' : 'Loc.', bd.locationAndMobility],
+                                [lang === 'fr' ? 'Visa / Droit' : 'Visa', bd.workAuthorization],
+                                [lang === 'fr' ? 'Disponibilité' : 'Avail.', bd.availability],
+                                [lang === 'fr' ? 'Salaire' : 'Salary', bd.salary],
+                                [lang === 'fr' ? 'Fiabilité' : 'Source', bd.sourceReliability],
+                              ].map(([lbl, val]) => (
+                                <span
+                                  key={String(lbl)}
+                                  className="px-2 py-0.5 rounded bg-jf-ice border border-jf-border text-jf-dark flex items-center justify-between gap-1"
+                                >
+                                  <span className="font-sans text-slate-500 truncate">{lbl}</span>
+                                  <span className="font-semibold text-jf-navy">{val}%</span>
+                                </span>
+                              ))}
                             </div>
                           </div>
-                          <div className="flex items-center gap-4 shrink-0">
-                            <span className="font-mono text-sm font-semibold tabular-nums text-jf-blue">
-                              {base.score}%
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedJobId(job.id);
-                                setMatchReport(null);
-                              }}
-                              className="text-xs font-medium text-jf-dark hover:text-jf-blue hover:underline whitespace-nowrap"
-                            >
-                              {lang === 'fr' ? 'Sélectionner' : 'Select'}
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

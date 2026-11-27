@@ -58,8 +58,13 @@
     "typescript": "^7.0.2"
   },
   "overrides": {
-    "@grpc/grpc-js": "^1.13.6",
+    "@grpc/grpc-js": "^1.14.7",
     "minimatch": "^11.0.9",
-    "glob": "^14.0.2"
+    "glob": "^14.0.6"
+  },
+  "resolutions": {
+    "@grpc/grpc-js": "^1.14.7",
+    "minimatch": "^11.0.9",
+    "glob": "^14.0.6"
   }
 }

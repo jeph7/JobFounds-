@@ -2,6 +2,10 @@ import { auth } from '../firebase';
 import {
   AdminEngineOverview,
   AdminReviewStatus,
+  ApplicationAttachmentInput,
+  ApplicationDeliveryStatus,
+  ApplicationSubmissionChannel,
+  ApplicationSubmissionRecord,
   AtsReport,
   BackgroundJobRecord,
   CandidateProfile,
@@ -22,6 +26,7 @@ import {
   DeployProtocol,
   DeployRunRecord,
   DomainHealthCheckResult,
+  EmployerApplicationStatus,
   GroundingSource,
   HiddenOpportunity,
   HrContactRecord,
@@ -32,32 +37,110 @@ import {
   GeocodedPlace,
   GeoReverseResponse,
   GeoSearchResponse,
+  JobAvailabilityCheck,
   JobListing,
   Lang,
   NeedClassification,
   NotificationRecord,
   OutreachDraft,
   RecruiterFinderResult,
+  ResendDomainDiagnostics,
   SalaryVisaReport,
   SmartMatchReport,
   SourceConfigRecord,
   VerificationReport,
 } from '../types';
 
-async function getAuthHeaders(): Promise<Record<string, string>> {
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+// Session token for Email/Password verified accounts — held strictly in JS memory (never localStorage)
+let inMemoryAppSessionToken: string | null = null;
+
+export function setAppSessionToken(token: string | null): void {
+  inMemoryAppSessionToken = token && token.trim() ? token.trim() : null;
+}
+
+export function getAppSessionToken(): string | null {
+  return inMemoryAppSessionToken;
+}
+
+async function resolveBearerToken(): Promise<string | null> {
   try {
     const user = auth.currentUser;
     if (user) {
       const idToken = await user.getIdToken();
-      if (idToken) {
-        headers.Authorization = `Bearer ${idToken}`;
-      }
+      if (idToken) return idToken;
     }
   } catch {
-    // fallback if token retrieval fails
+    // fallback to in-memory app session token
+  }
+  return inMemoryAppSessionToken;
+}
+
+async function getAuthHeaders(): Promise<Record<string, string>> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  const token = await resolveBearerToken();
+  if (token) {
+    headers.Authorization = `Bearer ${token}`;
   }
   return headers;
+}
+
+export interface AppAuthUser {
+  uid: string;
+  email: string;
+  fullName: string;
+  emailVerified: boolean;
+  accountRole: 'candidate' | 'recruiter';
+  isAdmin: boolean;
+  provider: 'password' | 'firebase';
+}
+
+export function authRegisterWithPassword(payload: {
+  fullName: string;
+  email: string;
+  password: string;
+  accountRole?: 'candidate' | 'recruiter';
+}) {
+  return postJson<{
+    user: AppAuthUser;
+    token: string;
+    verificationRequired: boolean;
+    emailSent: boolean;
+    emailReason: string;
+    expiresAt: string;
+    cooldownSeconds: number;
+  }>('/api/auth/register', payload);
+}
+
+export function authLoginWithPassword(payload: { email: string; password: string }) {
+  return postJson<{
+    user: AppAuthUser;
+    token: string;
+    verificationRequired: boolean;
+    emailSent?: boolean;
+    emailReason?: string;
+    expiresAt?: string;
+  }>('/api/auth/login', payload);
+}
+
+export function authVerifyEmailCode(payload: { email: string; code: string }) {
+  return postJson<{
+    verified: boolean;
+    user: AppAuthUser;
+    token: string;
+    message: string;
+  }>('/api/auth/verify-code', payload);
+}
+
+export function authResendVerificationCode(payload: { email: string }) {
+  return postJson<{
+    alreadyVerified?: boolean;
+    user?: AppAuthUser;
+    token?: string;
+    emailSent: boolean;
+    emailReason: string;
+    expiresAt?: string;
+    cooldownSeconds?: number;
+  }>('/api/auth/resend-code', payload);
 }
 
 async function requestJson<T>(
@@ -628,6 +711,114 @@ export function fetchCrmEmailSyncHistory(limit = 40) {
 }
 
 // =============================================================================
+// REAL LIVE JOB AVAILABILITY & APPLICATION SUBMISSION ENGINE
+// =============================================================================
+
+export function checkJobAvailability(url: string) {
+  return requestJson<{ result: JobAvailabilityCheck }>('POST', '/api/jobs/check-availability', {
+    url,
+  });
+}
+
+export function submitRealApplication(payload: {
+  applicationId?: string;
+  companyId?: string;
+  recruiterId?: string;
+  companyName: string;
+  roleTitle: string;
+  opportunityType: 'published_job' | 'hidden_opportunity';
+  classification?: NeedClassification | '';
+  channel: ApplicationSubmissionChannel;
+  recipientEmail?: string;
+  recipientName?: string;
+  officialUrl?: string;
+  subject: string;
+  coverLetter: string;
+  cvVersionName?: string;
+  candidateName?: string;
+  attachments?: ApplicationAttachmentInput[];
+  explicitAuthorization: true;
+}) {
+  return requestJson<{
+    submission: ApplicationSubmissionRecord;
+    transmitted: boolean;
+    deliveryStatus: ApplicationDeliveryStatus;
+    message: string;
+    nextStepUrl?: string;
+    mxVerified?: boolean;
+    availabilityCheck?: JobAvailabilityCheck | null;
+  }>('POST', '/api/applications/submit', payload);
+}
+
+export function fetchApplicationSubmissions(limit = 60) {
+  return requestJson<{
+    submissions: ApplicationSubmissionRecord[];
+    emailRelayReady: boolean;
+  }>('GET', `/api/applications/submissions?limit=${limit}`);
+}
+
+export function confirmPortalApplicationSubmission(submissionId: string, portalReference = '') {
+  return requestJson<{ submission: ApplicationSubmissionRecord }>(
+    'POST',
+    `/api/applications/submissions/${encodeURIComponent(submissionId)}/confirm-portal`,
+    { portalReference }
+  );
+}
+
+export function fetchEmployerApplications(limit = 60) {
+  return requestJson<{ applications: ApplicationSubmissionRecord[] }>(
+    'GET',
+    `/api/employer/applications?limit=${limit}`
+  );
+}
+
+export function respondToEmployerApplicationApi(
+  submissionId: string,
+  payload: { status: EmployerApplicationStatus; replyMessage: string }
+) {
+  return requestJson<{ submission: ApplicationSubmissionRecord }>(
+    'POST',
+    `/api/employer/applications/${encodeURIComponent(submissionId)}/respond`,
+    payload
+  );
+}
+
+export async function downloadSubmissionAttachment(
+  submissionId: string,
+  index: number,
+  fallbackFilename = 'document'
+): Promise<void> {
+  const token = (await resolveBearerToken()) || '';
+  const res = await fetch(
+    `/api/employer/applications/${encodeURIComponent(submissionId)}/attachments/${index}`,
+    {
+      method: 'GET',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    }
+  );
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error((err as any)?.error || `Téléchargement refusé (${res.status})`);
+  }
+  const blob = await res.blob();
+  const cd = res.headers.get('Content-Disposition') || '';
+  const match = cd.match(/filename="([^"]+)"/);
+  const filename = match?.[1] || fallbackFilename;
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+export function fetchEmailDeliveryStatus() {
+  return requestJson<{ diagnostics: ResendDomainDiagnostics }>('GET', '/api/email/status');
+}
+
+// =============================================================================
 // OPENSTREETMAP & NOMINATIM FREE GEOCODING CLIENT HELPERS
 // =============================================================================
 
@@ -734,7 +925,7 @@ export function fetchAdminDeployRun(runId: string) {
 }
 
 export async function downloadAdminDeployBundle(): Promise<void> {
-  const token = auth.currentUser ? await auth.currentUser.getIdToken() : '';
+  const token = (await resolveBearerToken()) || '';
   const res = await fetch('/api/admin/deploy/package', {
     method: 'GET',
     headers: token ? { Authorization: `Bearer ${token}` } : {},

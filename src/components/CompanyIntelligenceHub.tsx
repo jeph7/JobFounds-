@@ -42,12 +42,14 @@ import {
 } from '../utils/api';
 import { safeExternalUrl } from '../utils/safeUrl';
 import { CareerLocationMapHub } from './CareerLocationMapHub';
+import type { ApplicationModalTarget } from './ApplicationSubmissionModal';
 
 interface CompanyIntelligenceHubProps {
   lang: Lang;
   signedIn: boolean;
   onRequireSignIn: () => void;
   onCreateCrmApplication: (app: TrackedApplication) => void;
+  onOpenApplyModal?: (target: ApplicationModalTarget) => void;
   onNotify: (msg: string) => void;
 }
 
@@ -100,6 +102,7 @@ export function CompanyIntelligenceHub({
   signedIn,
   onRequireSignIn,
   onCreateCrmApplication,
+  onOpenApplyModal,
   onNotify,
 }: CompanyIntelligenceHubProps) {
   const [companies, setCompanies] = useState<CompanyRecord[]>([]);
@@ -402,8 +405,32 @@ export function CompanyIntelligenceHub({
 
   const handlePrepareSpontaneous = (company: CompanyRecord, signal?: CompanySignalRecord) => {
     const primaryContact = detail?.contacts.find((c) => c.confidenceLevel === 'confirmed') || detail?.contacts[0];
-    const followDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
     const inferredRole = signal?.inferredRoles?.[0] || `${company.sector || 'International'} Specialist`;
+
+    if (onOpenApplyModal) {
+      onOpenApplyModal({
+        companyId: company.id,
+        companyName: company.officialName,
+        roleTitle: inferredRole,
+        location: company.location || company.country || 'International',
+        sector: company.sector,
+        opportunityType: 'hidden_opportunity',
+        classification: signal?.classification || 'potential_opportunity',
+        officialUrl: company.careersUrl || company.officialWebsite,
+        sourceName: signal?.sourceName || company.officialName,
+        publishedDate: signal?.detectedDate,
+        inferredSkills: company.frequentSkills,
+        signalReason: signal?.title || signal?.summary,
+        signalEvidence: signal?.evidenceText || signal?.summary,
+        recommendedContactName: primaryContact?.fullName,
+        recommendedContactRole: primaryContact?.roleTitle,
+        recommendedContactEmail: primaryContact?.corporateEmail,
+        recommendedContactUrl: primaryContact?.publicUrl || company.careersUrl || company.officialWebsite,
+      });
+      return;
+    }
+
+    const followDate = new Date(Date.now() + 7 * 86400000).toISOString().slice(0, 10);
     onCreateCrmApplication({
       id: `app_spont_${Date.now()}`,
       role: inferredRole,
@@ -1110,7 +1137,7 @@ export function CompanyIntelligenceHub({
                                 </div>
                               )}
                             </div>
-                            <div className="flex items-center gap-2 shrink-0">
+                            <div className="flex flex-wrap items-center gap-2 shrink-0">
                               {applyHref && (
                                 <a
                                   href={applyHref}
@@ -1121,6 +1148,46 @@ export function CompanyIntelligenceHub({
                                   <span>{lang === 'fr' ? 'Poste officiel' : 'Official Post'}</span>
                                   <ArrowUpRight className="w-3 h-3" />
                                 </a>
+                              )}
+                              {onOpenApplyModal && job.status === 'active' && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const primaryContact =
+                                      detail.contacts.find((c) => c.confidenceLevel !== 'unverified') ||
+                                      detail.contacts[0];
+                                    onOpenApplyModal({
+                                      companyId: detail.company.id,
+                                      companyName: detail.company.officialName,
+                                      roleTitle: job.title,
+                                      location:
+                                        job.location ||
+                                        detail.company.location ||
+                                        detail.company.country ||
+                                        'International',
+                                      sector: detail.company.sector,
+                                      opportunityType: 'published_job',
+                                      classification: 'confirmed_job',
+                                      officialUrl: job.applyUrl || detail.company.careersUrl,
+                                      sourceName: `${detail.company.officialName} (${detail.company.atsProvider})`,
+                                      publishedDate: job.firstSeenAt?.slice(0, 10),
+                                      applicationDeadline: job.applicationDeadline,
+                                      salaryRange: job.salaryRange,
+                                      description: [job.department, job.workMode, job.contractType]
+                                        .filter(Boolean)
+                                        .join(' · '),
+                                      inferredSkills: job.skills,
+                                      recommendedContactName: primaryContact?.fullName,
+                                      recommendedContactRole: primaryContact?.roleTitle,
+                                      recommendedContactEmail: primaryContact?.corporateEmail,
+                                      recommendedContactUrl: primaryContact?.publicUrl,
+                                    });
+                                  }}
+                                  className="px-3 py-1.5 text-xs font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover rounded-lg inline-flex items-center gap-1"
+                                >
+                                  <Send className="w-3 h-3" />
+                                  <span>{lang === 'fr' ? 'Postuler' : 'Apply'}</span>
+                                </button>
                               )}
                               <button
                                 type="button"

@@ -10,276 +10,83 @@ import {
 export const GLOBAL_BANNER_URL = '/src/assets/images/banner_global_hub_1795459371734.jpg';
 export const CANDIDATE_AVATAR_URL = '/src/assets/images/avatar_candidate_profile_1795459370931.jpg';
 
+// Zero hardcoded/fictitious candidate profiles, CVs, jobs, hidden opportunities, applications, or watchlist items.
+// Every profile and CV is created or imported authentically by the user.
 export const initialCandidateProfile: CandidateProfile = {
-  fullName: 'Candidat JOBFOUNDS',
-  currentTitle: 'Senior Full-Stack & Product Engineer',
-  yearsExperience: 6,
-  highestDegree: 'Master (MSc / Ingénieur)',
-  skills: [
-    'TypeScript',
-    'React',
-    'Node.js',
-    'SQL',
-    'Cloud Architecture',
-    'Product Strategy',
-    'API Design',
-  ],
-  languages: ['French', 'English'],
-  preferredCountries: ['France', 'Canada', 'Switzerland', 'Germany', 'United Kingdom'],
-  preferredCities: ['Paris', 'Montreal', 'Zurich', 'Berlin', 'London'],
-  minSalaryAnnualUsd: 70000,
+  fullName: '',
+  currentTitle: '',
+  yearsExperience: 0,
+  highestDegree: '',
+  skills: [],
+  languages: [],
+  preferredCountries: [],
+  preferredCities: [],
+  minSalaryAnnualUsd: 0,
   salaryCurrency: 'EUR',
-  availability: 'Immediate / 1 month notice',
-  preferredWorkModes: ['Remote', 'Hybrid'],
-  preferredContracts: ['Full-time', 'Contract'],
-  originCountry: 'France',
-  workAuthorization: 'EU / International Sponsorship Ready',
-  relocationReady: true,
-  targetSectors: ['FinTech', 'Cloud & AI SaaS', 'Enterprise Software'],
+  availability: '',
+  preferredWorkModes: [],
+  preferredContracts: [],
+  originCountry: '',
+  workAuthorization: '',
+  relocationReady: false,
+  targetSectors: [],
 };
 
-export const initialCvDocuments: CvDocument[] = [
-  {
-    id: 'cv-primary-1',
-    versionName: 'CV Principal — International',
-    updatedAt: '2026-11-20',
-    template: 'executive',
-    fullName: initialCandidateProfile.fullName,
-    headline: 'Senior Full-Stack & Product Engineer · SaaS & Cloud',
-    email: 'contact@jobfounds.com',
-    phone: '+33 6 00 00 00 00',
-    location: 'Paris, France (Open to Remote / Relocation)',
-    linkedin: 'https://linkedin.com',
-    summary:
-      'Ingénieur produit et architectures web distribuées avec 6 ans d’expérience dans la conception de plateformes SaaS internationales, APIs critiques et expériences utilisateurs haute performance.',
-    experiences: [
-      {
-        id: 'exp-1',
-        role: 'Lead Full-Stack Engineer',
-        company: 'Plateforme SaaS Internationale',
-        location: 'Paris / Remote',
-        period: '2023 – Présent',
-        highlights: [
-          'Conception d’une architecture TypeScript / Node.js / React servant des équipes dans 12 pays.',
-          'Réduction de 42 % de la latence API grâce à la mise en cache structurée et au découpage de services.',
-          'Collaboration étroite avec les équipes Produit, Sécurité et Recrutement technique.',
-        ],
-      },
-      {
-        id: 'exp-2',
-        role: 'Software Engineer',
-        company: 'Enterprise Cloud Systems',
-        location: 'Lyon, France',
-        period: '2020 – 2023',
-        highlights: [
-          'Développement de tableaux de bord analytiques et connecteurs de données temps réel.',
-          'Mise en place de pipelines CI/CD et de tests automatisés de bout en bout.',
-        ],
-      },
-    ],
-    education: [
-      {
-        id: 'edu-1',
-        degree: 'Master en Informatique & Systèmes Distribués',
-        institution: 'Université / École d’Ingénieurs',
-        year: '2020',
-      },
-    ],
-    skills: [...initialCandidateProfile.skills],
-    languages: ['Français (Natif)', 'Anglais (C1 — Professionnel)'],
-  },
-];
+export const initialCvDocuments: CvDocument[] = [];
 
-export const initialJobs: JobListing[] = [
-  {
-    id: 'starter-stripe-staff-fe',
-    title: 'Senior Full-Stack Engineer, Payments Infrastructure',
-    company: 'Stripe',
-    country: 'Ireland',
-    city: 'Dublin',
-    workMode: 'Hybrid',
-    contractType: 'Full-time',
-    experienceLevel: 'Senior',
-    degreeRequired: "Bachelor's / Master's",
-    salaryRange: '95,000 – 125,000 EUR',
-    salaryMinAnnualUsd: 102000,
-    languages: ['English'],
-    skills: ['TypeScript', 'React', 'Node.js', 'API Design', 'SQL'],
-    publishedDate: '2026-11-22',
-    sourceName: 'Greenhouse Official ATS',
-    sourceUrl: 'https://boards.greenhouse.io/stripe',
-    verificationStatus: 'Verified',
-    verificationSummary:
-      'Portail carrière ATS officiel Greenhouse vérifié pour le domaine stripe.com.',
-    description:
-      'Conception et fiabilisation des interfaces marchands et APIs de paiement multi-devises pour l’Europe et l’international.',
-    recruiterHint: 'Stripe EMEA Talent Acquisition',
-    visaSponsorship: 'Available',
-  },
-  {
-    id: 'starter-datadog-paris',
-    title: 'Senior Product Engineer — Cloud Observability',
-    company: 'Datadog',
-    country: 'France',
-    city: 'Paris',
-    workMode: 'Hybrid',
-    contractType: 'Full-time',
-    experienceLevel: 'Senior',
-    degreeRequired: "Master's / Equivalent",
-    salaryRange: '80,000 – 105,000 EUR',
-    salaryMinAnnualUsd: 86000,
-    languages: ['French', 'English'],
-    skills: ['TypeScript', 'React', 'Cloud Architecture', 'SQL', 'Product Strategy'],
-    publishedDate: '2026-11-21',
-    sourceName: 'Greenhouse Official ATS',
-    sourceUrl: 'https://boards.greenhouse.io/datadog',
-    verificationStatus: 'Verified',
-    verificationSummary:
-      'Annonce rattachée au portail ATS officiel Greenhouse de Datadog (centre R&D Paris).',
-    description:
-      'Développement d’interfaces d’observabilité temps réel à grande échelle au sein du pôle R&D de Paris.',
-    recruiterHint: 'Datadog Paris Engineering Recruiting',
-    visaSponsorship: 'Available',
-  },
-  {
-    id: 'starter-alan-remote',
-    title: 'Staff Full-Stack Software Engineer',
-    company: 'Alan',
-    country: 'France',
-    city: 'Paris',
-    workMode: 'Remote',
-    contractType: 'Full-time',
-    experienceLevel: 'Senior',
-    degreeRequired: 'Not specified',
-    salaryRange: '82,000 – 102,000 EUR',
-    salaryMinAnnualUsd: 88000,
-    languages: ['French', 'English'],
-    skills: ['TypeScript', 'React', 'Node.js', 'SQL', 'Product Strategy'],
-    publishedDate: '2026-11-20',
-    sourceName: 'Ashby Official ATS',
-    sourceUrl: 'https://jobs.ashbyhq.com/alan',
-    verificationStatus: 'Verified',
-    verificationSummary:
-      'Portail officiel Ashby vérifié pour Alan (Politique Work From Anywhere en Europe).',
-    description:
-      'Construction des nouveaux parcours santé et assurance digitale en environnement remote-first asynchrone.',
-    recruiterHint: 'Alan Talent Team',
-    visaSponsorship: 'Case-by-case',
-  },
-  {
-    id: 'starter-adyen-amsterdam',
-    title: 'Platform Engineer — Global Financial APIs',
-    company: 'Adyen',
-    country: 'Netherlands',
-    city: 'Amsterdam',
-    workMode: 'Hybrid',
-    contractType: 'Full-time',
-    experienceLevel: 'Mid-level',
-    degreeRequired: "Bachelor's / Master's",
-    salaryRange: '78,000 – 98,000 EUR',
-    salaryMinAnnualUsd: 84000,
-    languages: ['English'],
-    skills: ['Node.js', 'API Design', 'SQL', 'Cloud Architecture'],
-    publishedDate: '2026-11-19',
-    sourceName: 'Greenhouse Official ATS',
-    sourceUrl: 'https://boards.greenhouse.io/adyen',
-    verificationStatus: 'Partially Verified',
-    verificationSummary:
-      'Portail carrière officiel identifié ; vérifiez la disponibilité exacte du poste avant candidature.',
-    description:
-      'Déploiement de connecteurs financiers haute disponibilité et intégration de nouveaux moyens de paiement internationaux.',
-    recruiterHint: 'Adyen Global Tech Hiring',
-    visaSponsorship: 'Available',
-  },
-];
+export const initialJobs: JobListing[] = [];
 
-export const initialHiddenOpportunities: HiddenOpportunity[] = [
-  {
-    id: 'hidden-algolia-eu',
-    company: 'Algolia',
-    country: 'France',
-    location: 'Paris, France',
-    sector: 'AI Search & Developer SaaS',
-    classification: 'Active Hiring Signal',
-    potentialRoles: ['Senior Frontend Engineer', 'AI Solutions Architect', 'Product Manager'],
-    detectionReason: 'Accélération des recrutements techniques détectée sur le portail carrière officiel',
-    signalEvidence:
-      'Plusieurs ouvertures simultanées sur les équipes AI Retrieval & Developer Experience à Paris et en télétravail Europe.',
-    sourceName: 'Official Corporate ATS Portal',
-    sourceUrl: 'https://boards.greenhouse.io/algolia',
-    detectedDate: '2026-11-21',
-    confidenceScore: 84,
-    confidenceJustification:
-      'Volume d’offres actives vérifié sur le portail officiel ATS, indiquant des besoins adjacents en ingénierie produit.',
-    professionalContact: {
-      nameOrDepartment: 'Algolia EMEA Talent Acquisition',
-      channel: 'Official Careers Portal',
-      url: 'https://www.algolia.com/careers/',
-    },
-    spontaneousOutreachAngle:
-      'Mettre en avant une expérience concrète sur la latence API, React/TypeScript et la recherche temps réel.',
-  },
-  {
-    id: 'hidden-celonis-munich',
-    company: 'Celonis',
-    country: 'Germany',
-    location: 'Munich, Germany',
-    sector: 'Enterprise AI & Process Intelligence',
-    classification: 'Potential Hiring Opportunity',
-    potentialRoles: ['Full-Stack Engineer', 'Data Platform Engineer', 'Forward Deployed Engineer'],
-    detectionReason: 'Expansion continue des équipes européennes Process Intelligence & AI',
-    signalEvidence:
-      'Présence active sur les hubs de Munich, Madrid et Londres avec recrutement régulier de profils multilingues.',
-    sourceName: 'Official Corporate ATS Portal',
-    sourceUrl: 'https://boards.greenhouse.io/celonis',
-    detectedDate: '2026-11-20',
-    confidenceScore: 76,
-    confidenceJustification:
-      'Signal basé sur la récurrence des recrutements européens observés sur le portail carrière public.',
-    professionalContact: {
-      nameOrDepartment: 'Celonis European Talent Desk',
-      channel: 'Official Careers Portal',
-      url: 'https://www.celonis.com/careers/',
-    },
-    spontaneousOutreachAngle:
-      'Proposer une candidature ciblée bilingue FR/EN orientée déploiement d’applications analytiques complexes.',
-  },
-];
+export const initialHiddenOpportunities: HiddenOpportunity[] = [];
 
 export const initialApplications: TrackedApplication[] = [];
 
-export const initialWatchlist: WatchlistItem[] = [
-  {
-    id: 'watch-datadog',
-    kind: 'company',
-    label: 'Datadog',
-    country: 'France',
-    sector: 'Cloud Observability & Security SaaS',
-    lastChecked: '2026-11-22',
-    lastSignalSummary: 'Surveillance active du portail officiel Greenhouse (hub R&D Paris).',
-    unreadAlerts: 1,
-  },
-  {
-    id: 'watch-alan',
-    kind: 'company',
-    label: 'Alan',
-    country: 'France',
-    sector: 'InsurTech & Digital Health',
-    lastChecked: '2026-11-22',
-    lastSignalSummary: 'Surveillance active du portail officiel Ashby (postes Remote Europe).',
-    unreadAlerts: 0,
-  },
-];
+export const initialWatchlist: WatchlistItem[] = [];
+
+export function isLegacyDemoProfile(p: CandidateProfile | null | undefined): boolean {
+  if (!p) return false;
+  return (
+    p.fullName === 'Candidat JOBFOUNDS' &&
+    p.currentTitle === 'Senior Full-Stack & Product Engineer' &&
+    p.yearsExperience === 6 &&
+    p.originCountry === 'France'
+  );
+}
+
+export function isLegacyDemoCv(cv: CvDocument | null | undefined): boolean {
+  if (!cv) return false;
+  return (
+    cv.id === 'cv-primary-1' &&
+    cv.email === 'contact@jobfounds.com' &&
+    cv.phone === '+33 6 00 00 00 00'
+  );
+}
+
+export interface NineCriteriaBreakdown {
+  skills: number;
+  experience: number;
+  education: number;
+  languages: number;
+  locationAndMobility: number;
+  workAuthorization: number;
+  availability: number;
+  salary: number;
+  sourceReliability: number;
+}
 
 export function computeBaselineMatch(
   profile: CandidateProfile,
   job: JobListing
-): { score: number; skillsRatio: string; locationAligned: boolean } {
+): {
+  score: number;
+  skillsRatio: string;
+  locationAligned: boolean;
+  breakdown: NineCriteriaBreakdown;
+} {
+  // 1. Skills
   const profileSkills = new Set(
     (profile.skills || []).map((s) => s.trim().toLowerCase()).filter(Boolean)
   );
   const jobSkills = (job.skills || []).map((s) => s.trim().toLowerCase()).filter(Boolean);
-
   let matchedSkillsCount = 0;
   for (const skill of jobSkills) {
     if (
@@ -289,51 +96,154 @@ export function computeBaselineMatch(
       matchedSkillsCount += 1;
     }
   }
+  const skills =
+    profileSkills.size === 0
+      ? 50
+      : jobSkills.length > 0
+        ? Math.round((matchedSkillsCount / jobSkills.length) * 100)
+        : 65;
 
-  const skillsPct =
-    jobSkills.length > 0 ? matchedSkillsCount / jobSkills.length : 0.6;
+  // 2. Professional Experience
+  const yrs = Number(profile.yearsExperience) || 0;
+  const lvl = `${job.experienceLevel || ''} ${job.title || ''}`.toLowerCase();
+  const isSenior = /\b(senior|staff|lead|principal|director|head|vp)\b/.test(lvl);
+  const isJunior = /\b(junior|entry|intern|stage|graduate)\b/.test(lvl);
+  const experience =
+    yrs === 0 && !profile.currentTitle
+      ? 50
+      : isSenior
+        ? yrs >= 5
+          ? 94
+          : yrs >= 3
+            ? 74
+            : 45
+        : isJunior
+          ? yrs <= 3
+            ? 92
+            : 82
+          : yrs >= 2
+            ? 88
+            : 68;
 
+  // 3. Education & Degrees
+  const deg = (profile.highestDegree || '').toLowerCase();
+  const reqDeg = (job.degreeRequired || '').toLowerCase();
+  const education = !deg
+    ? 60
+    : /\b(phd|doctorat|doctorate)\b/.test(deg)
+      ? 96
+      : /\b(master|mba|msc|ing[eé]nieur|bac\+5)\b/.test(deg)
+        ? 92
+        : /\b(bachelor|licence|bac\+3|bac\+4|bsc)\b/.test(deg)
+          ? /\b(phd|master)\b/.test(reqDeg)
+            ? 72
+            : 88
+          : 74;
+
+  // 4. Languages
+  const profileLangs = new Set(
+    (profile.languages || []).map((l) => l.toLowerCase().split(/[\s(]/)[0]).filter(Boolean)
+  );
+  const jobLangs = (job.languages || [])
+    .map((l) => l.toLowerCase().split(/[\s(]/)[0])
+    .filter(Boolean);
+  const langAligned =
+    jobLangs.length === 0 ||
+    profileLangs.size === 0 ||
+    jobLangs.some((l) => profileLangs.has(l));
+  const languages =
+    profileLangs.size === 0 ? 60 : langAligned ? 92 : 45;
+
+  // 5. Location, Mobility & Work Mode
   const prefCountries = (profile.preferredCountries || []).map((c) => c.toLowerCase());
   const prefCities = (profile.preferredCities || []).map((c) => c.toLowerCase());
   const jobCountry = (job.country || '').toLowerCase();
   const jobCity = (job.city || '').toLowerCase();
-
   const locationAligned =
     job.workMode === 'Remote' ||
+    prefCountries.length === 0 ||
     prefCountries.some((c) => c && (jobCountry.includes(c) || c.includes(jobCountry))) ||
     prefCities.some((c) => c && (jobCity.includes(c) || c.includes(jobCity)));
-
   const workModeAligned =
     !profile.preferredWorkModes?.length ||
     profile.preferredWorkModes.includes(job.workMode);
+  const locationAndMobility = locationAligned
+    ? workModeAligned
+      ? 94
+      : 78
+    : profile.relocationReady
+      ? 72
+      : 42;
 
-  const contractAligned =
-    !profile.preferredContracts?.length ||
-    profile.preferredContracts.includes(job.contractType);
+  // 6. Work Authorization & Visa
+  const authText = (profile.workAuthorization || '').toLowerCase();
+  const visaText = (job.visaSponsorship || '').toLowerCase();
+  const workAuthorization =
+    job.workMode === 'Remote'
+      ? 88
+      : !authText
+        ? 65
+        : /\b(available|yes|oui|sponsorship)\b/.test(visaText) ||
+            /\b(citizen|citoyen|permanent|authorized|autoris|permis|eu|ue)\b/.test(authText)
+          ? 90
+          : 68;
 
-  const profileLangs = new Set(
-    (profile.languages || []).map((l) => l.toLowerCase().split(/[\s(]/)[0])
-  );
-  const jobLangs = (job.languages || []).map((l) => l.toLowerCase().split(/[\s(]/)[0]);
-  const langAligned =
-    jobLangs.length === 0 || jobLangs.some((l) => profileLangs.has(l));
+  // 7. Availability
+  const avail = (profile.availability || '').toLowerCase();
+  const availability = !avail
+    ? 70
+    : /\b(imm[eé]diat|immediate|asap|now|1 month|1 mois|2 weeks)\b/.test(avail)
+      ? 95
+      : 78;
 
+  // 8. Salary Expectations
   const salaryAligned =
     !job.salaryMinAnnualUsd ||
     !profile.minSalaryAnnualUsd ||
     job.salaryMinAnnualUsd >= profile.minSalaryAnnualUsd * 0.85;
+  const salary =
+    !profile.minSalaryAnnualUsd || !job.salaryMinAnnualUsd
+      ? 75
+      : salaryAligned
+        ? 92
+        : 52;
 
-  const rawScore =
-    skillsPct * 50 +
-    (locationAligned ? 18 : 6) +
-    (workModeAligned ? 10 : 3) +
-    (contractAligned ? 7 : 2) +
-    (langAligned ? 8 : 2) +
-    (salaryAligned ? 7 : 2);
+  // 9. Source Reliability
+  const sourceReliability =
+    job.verificationStatus === 'Verified'
+      ? 96
+      : job.verificationStatus === 'Partially Verified'
+        ? 76
+        : job.verificationStatus === 'Suspicious' || job.verificationStatus === 'Expired'
+          ? 20
+          : 52;
+
+  const weighted = Math.round(
+    skills * 0.28 +
+      experience * 0.16 +
+      education * 0.08 +
+      languages * 0.09 +
+      locationAndMobility * 0.14 +
+      workAuthorization * 0.08 +
+      availability * 0.05 +
+      salary * 0.05 +
+      sourceReliability * 0.07
+  );
 
   return {
-    score: Math.max(15, Math.min(99, Math.round(rawScore))),
+    score: Math.max(15, Math.min(99, weighted)),
     skillsRatio: `${matchedSkillsCount}/${jobSkills.length || 0}`,
     locationAligned,
+    breakdown: {
+      skills,
+      experience,
+      education,
+      languages,
+      locationAndMobility,
+      workAuthorization,
+      availability,
+      salary,
+      sourceReliability,
+    },
   };
 }

@@ -3,7 +3,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {
   closeEngineDb,
+  createEngineDbBackup,
   getEngineDb,
+  listEngineDbBackups,
   resolveEngineDataDir,
 } from '../serverEngineDb.ts';
 import { runCronBatch } from '../serverWorkerEngine.ts';
@@ -15,7 +17,7 @@ import { runCronBatch } from '../serverWorkerEngine.ts';
  * 2 CPU, 3 GB RAM, no permanent background daemon).
  *
  * Usage in Hostinger hPanel -> Cron Jobs (every 10 or 15 minutes):
- *   cd ~/domains/jobfounds.com/nodejs && npm run cron:tick
+ *   cd ~/domains/jobfounds.com/nodejs && node dist-server/cron-worker.mjs
  */
 
 const STALE_LOCK_MS = 28 * 60_000; // Auto-recover stale lock if a previous cron hit Hostinger's 30-min cap
@@ -90,7 +92,20 @@ async function main() {
       trigger: 'hostinger_cli_cron',
     });
 
-    console.log(JSON.stringify({ ok: true, summary }));
+    // Automatic daily SQLite backup (keeps last 7 snapshots)
+    let backupCreated: { filename: string; sizeBytes: number } | null = null;
+    try {
+      const backups = listEngineDbBackups();
+      const latestMs = backups[0] ? Date.parse(backups[0].createdAt) : 0;
+      if (!latestMs || Date.now() - latestMs >= 24 * 60 * 60_000) {
+        const snap = createEngineDbBackup('cron_daily', 7);
+        backupCreated = { filename: snap.filename, sizeBytes: snap.sizeBytes };
+      }
+    } catch {
+      // Non-fatal; cron batch already completed
+    }
+
+    console.log(JSON.stringify({ ok: true, summary, backupCreated }));
   } catch (err) {
     exitCode = 1;
     console.error(

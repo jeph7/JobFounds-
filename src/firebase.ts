@@ -3,6 +3,7 @@ import {
   getAuth,
   GoogleAuthProvider,
   onAuthStateChanged,
+  reauthenticateWithPopup,
   signInWithPopup,
   signOut,
 } from 'firebase/auth';
@@ -96,8 +97,34 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+function mapFirebaseAuthError(err: unknown): Error {
+  const code = (err as { code?: string })?.code || '';
+  if (code === 'auth/popup-blocked') {
+    return new Error(
+      'La fenêtre de connexion Google a été bloquée par le navigateur. Autorisez les pop-ups pour ce site puis réessayez.'
+    );
+  }
+  if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
+    return new Error('Connexion Google annulée avant validation.');
+  }
+  if (code === 'auth/unauthorized-domain') {
+    return new Error(
+      `Domaine non autorisé dans Firebase Auth (${typeof window !== 'undefined' ? window.location.hostname : ''}). Ajoutez ce domaine dans Firebase Console > Authentication > Authorized domains.`
+    );
+  }
+  if (code === 'auth/operation-not-allowed') {
+    return new Error('La connexion Google n’est pas activée dans la configuration Firebase.');
+  }
+  return err instanceof Error ? err : new Error(String(err || 'Google authentication failed.'));
+}
+
 export async function signInWithGooglePopup() {
-  return signInWithPopup(auth, googleProvider);
+  googleProvider.setCustomParameters({ prompt: 'select_account' });
+  try {
+    return await signInWithPopup(auth, googleProvider);
+  } catch (err) {
+    throw mapFirebaseAuthError(err);
+  }
 }
 
 export async function connectGmailReadonly(): Promise<{ accessToken: string; email: string }> {
@@ -107,18 +134,31 @@ export async function connectGmailReadonly(): Promise<{ accessToken: string; ema
   }
   gmailProvider.setCustomParameters({
     prompt: 'consent select_account',
+    include_granted_scopes: 'true',
   });
-  const result = await signInWithPopup(auth, gmailProvider);
-  const credential = GoogleAuthProvider.credentialFromResult(result);
-  if (!credential?.accessToken) {
-    throw new Error('Unable to obtain Gmail read-only access token.');
+
+  try {
+    const result = auth.currentUser
+      ? await reauthenticateWithPopup(auth.currentUser, gmailProvider).catch(() =>
+          signInWithPopup(auth, gmailProvider)
+        )
+      : await signInWithPopup(auth, gmailProvider);
+
+    const credential = GoogleAuthProvider.credentialFromResult(result);
+    if (!credential?.accessToken) {
+      throw new Error(
+        'Autorisation OAuth Gmail (lecture seule) non reçue. Vérifiez que la case d’accès Gmail lecture seule a bien été cochée.'
+      );
+    }
+    cachedGmailAccessToken = credential.accessToken;
+    cachedGmailEmail = result.user.email || auth.currentUser?.email || '';
+    return {
+      accessToken: cachedGmailAccessToken,
+      email: cachedGmailEmail,
+    };
+  } catch (err) {
+    throw mapFirebaseAuthError(err);
   }
-  cachedGmailAccessToken = credential.accessToken;
-  cachedGmailEmail = result.user.email || auth.currentUser?.email || '';
-  return {
-    accessToken: cachedGmailAccessToken,
-    email: cachedGmailEmail,
-  };
 }
 
 export function getGmailAccessToken(): string | null {

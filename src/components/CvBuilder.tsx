@@ -60,7 +60,32 @@ export function CvBuilder({
     }
   }, [targetJobPrefill]);
 
+  const handleCreateBlankCv = () => {
+    const newId = `cv-${Date.now()}`;
+    const today = new Date().toISOString().slice(0, 10);
+    const blankDoc: CvDocument = {
+      id: newId,
+      versionName: lang === 'fr' ? `Mon CV — ${today}` : `My Resume — ${today}`,
+      updatedAt: today,
+      template: 'executive',
+      fullName: '',
+      headline: '',
+      email: '',
+      phone: '',
+      location: '',
+      linkedin: '',
+      summary: '',
+      experiences: [],
+      education: [],
+      skills: [],
+      languages: [],
+    };
+    onUpdateVersions([...versions, blankDoc]);
+    onSelectVersion(newId);
+  };
+
   const updateCurrent = (updater: (cv: CvDocument) => CvDocument) => {
+    if (!currentCv) return;
     const today = new Date().toISOString().slice(0, 10);
     onUpdateVersions(
       versions.map((v) =>
@@ -70,6 +95,7 @@ export function CvBuilder({
   };
 
   const handleDuplicateVersion = () => {
+    if (!currentCv) return;
     const newId = `cv-${Date.now()}`;
     const copyDoc: CvDocument = {
       ...currentCv,
@@ -85,12 +111,13 @@ export function CvBuilder({
     if (versions.length <= 1) return;
     const remaining = versions.filter((v) => v.id !== id);
     onUpdateVersions(remaining);
-    if (activeVersionId === id) {
+    if (activeVersionId === id && remaining[0]) {
       onSelectVersion(remaining[0].id);
     }
   };
 
   const handleAiAction = async (action: 'correct' | 'optimize' | 'tailor' | 'cover_letter') => {
+    if (!currentCv) return;
     setAiLoading(action);
     setAiError(null);
     try {
@@ -141,7 +168,7 @@ export function CvBuilder({
             : `Imported CV — ${new Date().toISOString().slice(0, 10)}`,
         updatedAt: new Date().toISOString().slice(0, 10),
         template: 'executive',
-        fullName: parsed.fullName || currentCv.fullName,
+        fullName: parsed.fullName || currentCv?.fullName || '',
         headline: parsed.headline || '',
         email: parsed.email || '',
         phone: parsed.phone || '',
@@ -218,7 +245,7 @@ export function CvBuilder({
           versionName: `${baseLabel} (${ext.toUpperCase()})`,
           updatedAt: new Date().toISOString().slice(0, 10),
           template: 'executive',
-          fullName: parsed.fullName || currentCv.fullName,
+          fullName: parsed.fullName || currentCv?.fullName || '',
           headline: parsed.headline || '',
           email: parsed.email || '',
           phone: parsed.phone || '',
@@ -279,32 +306,45 @@ export function CvBuilder({
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
+              onClick={handleCreateBlankCv}
+              className="px-3.5 py-2 text-xs font-medium text-jf-navy bg-jf-ice border border-jf-border hover:bg-jf-soft rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>{lang === 'fr' ? 'Nouveau CV vierge' : 'New Blank CV'}</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setImportOpen((v) => !v)}
               className="px-3.5 py-2 text-xs font-medium text-slate-700 bg-white border border-slate-200 hover:bg-slate-50 rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
             >
               <FileUp className="w-3.5 h-3.5" />
               <span>{lang === 'fr' ? 'Importer PDF / DOCX' : 'Import PDF / DOCX'}</span>
             </button>
-            <button
-              type="button"
-              onClick={() => void exportCvAsWord(currentCv, lang)}
-              className="px-3.5 py-2 text-xs font-medium text-jf-dark bg-white border border-jf-border hover:bg-jf-ice rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>{lang === 'fr' ? 'Exporter Word (.docx)' : 'Export Word (.docx)'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => exportCvAsPdf(currentCv, lang)}
-              className="px-3.5 py-2 text-xs font-medium text-white bg-jf-blue hover:bg-jf-blue-hover rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
-            >
-              <Download className="w-3.5 h-3.5" />
-              <span>{lang === 'fr' ? 'Exporter PDF' : 'Export PDF'}</span>
-            </button>
+            {currentCv && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void exportCvAsWord(currentCv, lang)}
+                  className="px-3.5 py-2 text-xs font-medium text-jf-dark bg-white border border-jf-border hover:bg-jf-ice rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{lang === 'fr' ? 'Exporter Word (.docx)' : 'Export Word (.docx)'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => exportCvAsPdf(currentCv, lang)}
+                  className="px-3.5 py-2 text-xs font-medium text-white bg-jf-blue hover:bg-jf-blue-hover rounded-lg transition-colors inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>{lang === 'fr' ? 'Exporter PDF' : 'Export PDF'}</span>
+                </button>
+              </>
+            )}
           </div>
         </div>
 
         {/* Version Switcher & Template Selector */}
+        {currentCv && (
         <div className="flex flex-wrap items-center justify-between gap-4 pt-4 border-t border-slate-100">
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-medium text-slate-500">
@@ -359,6 +399,7 @@ export function CvBuilder({
             ))}
           </div>
         </div>
+        )}
 
         {/* Import Panel */}
         {importOpen && (
@@ -438,6 +479,42 @@ export function CvBuilder({
         )}
       </section>
 
+      {!currentCv ? (
+        <section className="bg-white border border-dashed border-jf-border rounded-xl p-10 text-center space-y-4">
+          <FileText className="w-8 h-8 text-jf-blue mx-auto" />
+          <div className="space-y-1 max-w-lg mx-auto">
+            <h2 className="font-display text-lg font-semibold text-jf-navy">
+              {lang === 'fr'
+                ? 'Aucun CV enregistré pour le moment'
+                : 'No CV saved yet'}
+            </h2>
+            <p className="text-sm text-slate-600">
+              {lang === 'fr'
+                ? 'JOBFOUNDS ne crée aucun CV de démonstration fictif. Importez votre CV existant (PDF, Word .docx ou texte) ou créez un CV vierge à partir de votre parcours réel.'
+                : 'JOBFOUNDS never populates fake demo resumes. Import your real CV (PDF, Word .docx, or text) or start a blank resume from scratch.'}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-3 pt-1">
+            <button
+              type="button"
+              onClick={() => setImportOpen(true)}
+              className="px-4 py-2.5 text-xs font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover rounded-lg inline-flex items-center gap-2"
+            >
+              <FileUp className="w-4 h-4" />
+              <span>{lang === 'fr' ? 'Importer mon CV (PDF / DOCX)' : 'Import My CV (PDF / DOCX)'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleCreateBlankCv}
+              className="px-4 py-2.5 text-xs font-semibold text-jf-navy bg-jf-ice hover:bg-jf-soft border border-jf-border rounded-lg inline-flex items-center gap-2"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{lang === 'fr' ? 'Créer un CV vierge' : 'Create Blank CV'}</span>
+            </button>
+          </div>
+        </section>
+      ) : (
+        <>
       {/* AI Optimization Bar */}
       <section className="bg-white border border-slate-200 rounded-xl p-5 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-3">
@@ -1009,6 +1086,8 @@ export function CvBuilder({
           </div>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

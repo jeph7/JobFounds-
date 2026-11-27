@@ -14,7 +14,14 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export type AtsProvider = 'greenhouse' | 'lever' | 'ashby' | 'custom_jsonld' | 'none';
+export type AtsProvider =
+  | 'greenhouse'
+  | 'lever'
+  | 'ashby'
+  | 'workday'
+  | 'smartrecruiters'
+  | 'custom_jsonld'
+  | 'none';
 export type SignalType =
   | 'expansion'
   | 'new_office'
@@ -105,6 +112,7 @@ export interface CareerJobRecord {
   atsSource: string;
   contentHash: string;
   status: 'active' | 'removed' | 'expired';
+  applicationDeadline?: string;
   firstSeenAt: string;
   lastSeenAt: string;
   removedAt: string | null;
@@ -130,6 +138,7 @@ export interface HrContactRecord {
   roleCategory: string;
   publicProfileUrl: string;
   publicChannel: string;
+  publicEmail?: string;
   emailDomainVerified: boolean;
   mxVerified: boolean;
   sourceName: string;
@@ -139,6 +148,62 @@ export interface HrContactRecord {
   confidenceScore: number;
   verificationNote: string;
   adminStatus: AdminReviewStatus;
+}
+
+export type ApplicationSubmissionChannel =
+  | 'resend_email'
+  | 'official_portal'
+  | 'jobfounds_direct';
+
+export type ApplicationDeliveryStatus =
+  | 'transmitted_email'
+  | 'transmitted_jobfounds_portal'
+  | 'awaiting_portal_confirmation'
+  | 'portal_confirmed_by_user'
+  | 'failed';
+
+export type EmployerApplicationStatus =
+  | 'received'
+  | 'under_review'
+  | 'interview_scheduled'
+  | 'offer_received'
+  | 'rejected'
+  | 'message_received';
+
+export interface ApplicationSubmissionRecord {
+  id: string;
+  userId: string;
+  recruiterId: string;
+  candidateName: string;
+  candidateEmail: string;
+  applicationId: string;
+  companyId: string;
+  companyName: string;
+  roleTitle: string;
+  opportunityType: 'published_job' | 'hidden_opportunity';
+  classification: NeedClassification | '';
+  channel: ApplicationSubmissionChannel;
+  recipientEmail: string;
+  recipientName: string;
+  officialUrl: string;
+  subject: string;
+  coverLetterPreview: string;
+  coverLetterFull: string;
+  cvVersionName: string;
+  attachments: Array<{ filename: string; contentType: string; sizeBytes: number }>;
+  explicitAuthorization: boolean;
+  authorizationTimestamp: string;
+  transmitted: boolean;
+  deliveryStatus: ApplicationDeliveryStatus;
+  providerMessageId: string;
+  portalConfirmedAt: string | null;
+  portalReference: string;
+  employerStatus: EmployerApplicationStatus;
+  employerReply: string;
+  employerRepliedAt: string | null;
+  errorMessage: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface BackgroundJobRecord {
@@ -553,7 +618,91 @@ export function getEngineDb(): DatabaseSync {
     );
 
     CREATE INDEX IF NOT EXISTS idx_deploy_runs_started ON deploy_runs(started_at DESC);
+
+    CREATE TABLE IF NOT EXISTS application_submissions (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      application_id TEXT DEFAULT '',
+      company_id TEXT DEFAULT '',
+      company_name TEXT NOT NULL,
+      role_title TEXT NOT NULL,
+      opportunity_type TEXT NOT NULL DEFAULT 'published_job',
+      classification TEXT DEFAULT '',
+      channel TEXT NOT NULL,
+      recipient_email TEXT DEFAULT '',
+      recipient_name TEXT DEFAULT '',
+      official_url TEXT DEFAULT '',
+      subject TEXT DEFAULT '',
+      cover_letter_preview TEXT DEFAULT '',
+      cv_version_name TEXT DEFAULT '',
+      attachments_json TEXT DEFAULT '[]',
+      explicit_authorization INTEGER NOT NULL DEFAULT 0,
+      authorization_timestamp TEXT NOT NULL,
+      transmitted INTEGER NOT NULL DEFAULT 0,
+      delivery_status TEXT NOT NULL,
+      provider_message_id TEXT DEFAULT '',
+      portal_confirmed_at TEXT,
+      portal_reference TEXT DEFAULT '',
+      error_message TEXT DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_app_submissions_user ON application_submissions(user_id, created_at DESC);
+
+    CREATE TABLE IF NOT EXISTS auth_users (
+      uid TEXT PRIMARY KEY,
+      email TEXT NOT NULL UNIQUE,
+      full_name TEXT NOT NULL,
+      password_hash TEXT NOT NULL,
+      password_salt TEXT NOT NULL,
+      email_verified INTEGER NOT NULL DEFAULT 0,
+      verified_at TEXT,
+      account_role TEXT NOT NULL DEFAULT 'candidate',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_auth_users_email ON auth_users(email);
+
+    CREATE TABLE IF NOT EXISTS email_verification_codes (
+      id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL REFERENCES auth_users(uid) ON DELETE CASCADE,
+      email TEXT NOT NULL,
+      code_hash TEXT NOT NULL,
+      code_salt TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 5,
+      consumed_at TEXT,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_email_verif_user ON email_verification_codes(user_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_email_verif_email ON email_verification_codes(email, created_at DESC);
   `);
+
+  // Safe additive column migrations for existing production SQLite databases
+  const safeAddColumn = (table: string, colDef: string) => {
+    try {
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${colDef};`);
+    } catch {
+      // Column already exists
+    }
+  };
+  safeAddColumn('career_jobs', "application_deadline TEXT DEFAULT ''");
+  safeAddColumn('hr_contacts', "public_email TEXT DEFAULT ''");
+  safeAddColumn('application_submissions', "recruiter_id TEXT DEFAULT ''");
+  safeAddColumn('application_submissions', "candidate_name TEXT DEFAULT ''");
+  safeAddColumn('application_submissions', "candidate_email TEXT DEFAULT ''");
+  safeAddColumn('application_submissions', "cover_letter_full TEXT DEFAULT ''");
+  safeAddColumn('application_submissions', "attachments_data_json TEXT DEFAULT '[]'");
+  safeAddColumn('application_submissions', "employer_status TEXT DEFAULT 'received'");
+  safeAddColumn('application_submissions', "employer_reply TEXT DEFAULT ''");
+  safeAddColumn('application_submissions', 'employer_replied_at TEXT');
+  db.exec(
+    'CREATE INDEX IF NOT EXISTS idx_app_submissions_recruiter ON application_submissions(recruiter_id, created_at DESC);'
+  );
 
   // Initialize real external source registry (connector definitions only — zero fake business data)
   const defaultSources: Array<{
@@ -565,10 +714,14 @@ export function getEngineDb(): DatabaseSync {
     { id: 'greenhouse_api', name: 'Greenhouse Official Job Board API', category: 'ats', rateLimitPerHour: 120 },
     { id: 'lever_api', name: 'Lever Official Postings API', category: 'ats', rateLimitPerHour: 120 },
     { id: 'ashby_api', name: 'Ashby Public Job Board API', category: 'ats', rateLimitPerHour: 120 },
+    { id: 'workday_api', name: 'Workday Official CXS Careers API', category: 'ats', rateLimitPerHour: 90 },
+    { id: 'smartrecruiters_api', name: 'SmartRecruiters Official Postings API', category: 'ats', rateLimitPerHour: 120 },
     { id: 'custom_career_jsonld', name: 'Official Career Page JSON-LD Checker', category: 'ats', rateLimitPerHour: 60 },
-    { id: 'arbeitnow_api', name: 'Arbeitnow Public Job Feed', category: 'job_feed', rateLimitPerHour: 60 },
-    { id: 'remotive_api', name: 'Remotive Remote Job Feed', category: 'job_feed', rateLimitPerHour: 60 },
-    { id: 'themuse_api', name: 'The Muse Public Job API', category: 'job_feed', rateLimitPerHour: 60 },
+    { id: 'arbeitnow_api', name: 'Arbeitnow Public Job Feed', category: 'job_feed', rateLimitPerHour: 300 },
+    { id: 'remotive_api', name: 'Remotive Remote Job Feed', category: 'job_feed', rateLimitPerHour: 300 },
+    { id: 'themuse_api', name: 'The Muse Public Job API', category: 'job_feed', rateLimitPerHour: 300 },
+    { id: 'jobicy_api', name: 'Jobicy International Job Feed', category: 'job_feed', rateLimitPerHour: 300 },
+    { id: 'himalayas_api', name: 'Himalayas Global Job Feed', category: 'job_feed', rateLimitPerHour: 300 },
     { id: 'gemini_google_search', name: 'Gemini + Google Search Grounding', category: 'ai_search', rateLimitPerHour: 100 },
     { id: 'dns_mx_verifier', name: 'DNS MX Corporate Domain Verifier', category: 'verification', rateLimitPerHour: 240 },
     { id: 'gmail_api', name: 'Gmail Read-Only Recruiter Reply Sync', category: 'verification', rateLimitPerHour: 120 },
@@ -583,6 +736,9 @@ export function getEngineDb(): DatabaseSync {
   for (const s of defaultSources) {
     insertSource.run(s.id, s.name, s.category, s.rateLimitPerHour, now);
   }
+  db.prepare(
+    "UPDATE source_configs SET rate_limit_per_hour = 300 WHERE category = 'job_feed' AND rate_limit_per_hour < 300"
+  ).run();
 
   dbInstance = db;
   return db;
@@ -808,6 +964,31 @@ export function detectAtsFromCareersUrl(careersUrl: string): {
       const token = parts[0];
       if (token && /^[a-zA-Z0-9_-]+$/.test(token)) {
         return { provider: 'ashby', token };
+      }
+    }
+    if (host.endsWith('.myworkdayjobs.com') || host.endsWith('.myworkdaysite.com')) {
+      // Example: https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite
+      const hostSub = host.split('.')[0] || '';
+      const filteredParts = parts.filter(
+        (p) => !/^[a-z]{2}(-[A-Z]{2})?$/i.test(p) && p.toLowerCase() !== 'recruiting'
+      );
+      const site =
+        host.endsWith('.myworkdaysite.com') && filteredParts.length >= 2
+          ? filteredParts[1]
+          : filteredParts[0] || '';
+      const tenant =
+        host.endsWith('.myworkdaysite.com') && filteredParts.length >= 2
+          ? filteredParts[0]
+          : hostSub;
+      if (tenant && site && /^[a-zA-Z0-9_-]+$/.test(tenant) && /^[a-zA-Z0-9_-]+$/.test(site)) {
+        return { provider: 'workday', token: `${host}|${tenant}|${site}` };
+      }
+    }
+    if (host.includes('smartrecruiters.com') && parts.length > 0) {
+      // Example: https://jobs.smartrecruiters.com/Visa or careers.smartrecruiters.com/Company
+      const token = parts[0];
+      if (token && /^[a-zA-Z0-9._-]+$/.test(token)) {
+        return { provider: 'smartrecruiters', token };
       }
     }
     return { provider: 'custom_jsonld', token: '' };
@@ -1342,6 +1523,7 @@ export function listCompanyCareerJobs(companyId: string, includeRemoved = false)
     atsSource: r.ats_source,
     contentHash: r.content_hash,
     status: r.status,
+    applicationDeadline: r.application_deadline || '',
     firstSeenAt: r.first_seen_at,
     lastSeenAt: r.last_seen_at,
     removedAt: r.removed_at || null,
@@ -1377,6 +1559,7 @@ export function listAllActiveCareerJobs(limit = 150): Array<CareerJobRecord & { 
     atsSource: r.ats_source,
     contentHash: r.content_hash,
     status: r.status,
+    applicationDeadline: r.application_deadline || '',
     firstSeenAt: r.first_seen_at,
     lastSeenAt: r.last_seen_at,
     removedAt: r.removed_at || null,
@@ -1410,6 +1593,7 @@ export function upsertHrContact(input: {
   roleCategory?: string;
   publicProfileUrl?: string;
   publicChannel?: string;
+  publicEmail?: string;
   emailDomainVerified?: boolean;
   mxVerified?: boolean;
   sourceName: string;
@@ -1428,6 +1612,11 @@ export function upsertHrContact(input: {
   const now = new Date().toISOString();
   const profileUrl = sanitizeHttpUrl(input.publicProfileUrl);
   const srcUrl = sanitizeHttpUrl(input.sourceUrl);
+  const cleanPublicEmail =
+    typeof input.publicEmail === 'string' &&
+    /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(input.publicEmail.trim())
+      ? input.publicEmail.trim().toLowerCase().slice(0, 160)
+      : '';
 
   const existing = db.prepare('SELECT * FROM hr_contacts WHERE dedup_key = ?').get(dedupKey) as any;
   if (existing) {
@@ -1436,6 +1625,7 @@ export function upsertHrContact(input: {
         department = COALESCE(NULLIF(?, ''), department),
         public_profile_url = COALESCE(NULLIF(?, ''), public_profile_url),
         public_channel = COALESCE(NULLIF(?, ''), public_channel),
+        public_email = COALESCE(NULLIF(?, ''), public_email),
         email_domain_verified = ?,
         mx_verified = ?,
         source_name = ?,
@@ -1449,6 +1639,7 @@ export function upsertHrContact(input: {
       clampStr(input.department || '', 100),
       profileUrl,
       clampStr(input.publicChannel || '', 120),
+      cleanPublicEmail,
       input.emailDomainVerified ? 1 : 0,
       input.mxVerified ? 1 : 0,
       clampStr(input.sourceName, 120),
@@ -1467,10 +1658,10 @@ export function upsertHrContact(input: {
   db.prepare(`
     INSERT INTO hr_contacts (
       id, company_id, full_name, role_title, department, role_category,
-      public_profile_url, public_channel, email_domain_verified, mx_verified,
+      public_profile_url, public_channel, public_email, email_domain_verified, mx_verified,
       source_name, source_url, verified_at, confidence_level, confidence_score,
       verification_note, admin_status, dedup_key
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
   `).run(
     id,
     input.companyId,
@@ -1480,6 +1671,7 @@ export function upsertHrContact(input: {
     clampStr(input.roleCategory || 'Other', 80),
     profileUrl,
     clampStr(input.publicChannel || 'Public Profile', 120),
+    cleanPublicEmail,
     input.emailDomainVerified ? 1 : 0,
     input.mxVerified ? 1 : 0,
     clampStr(input.sourceName, 120),
@@ -1505,6 +1697,7 @@ function mapContactRow(r: any): HrContactRecord {
     roleCategory: r.role_category || 'Other',
     publicProfileUrl: r.public_profile_url || '',
     publicChannel: r.public_channel || '',
+    publicEmail: r.public_email || '',
     emailDomainVerified: Boolean(r.email_domain_verified),
     mxVerified: Boolean(r.mx_verified),
     sourceName: r.source_name,
@@ -2061,7 +2254,504 @@ export function getEngineOverviewMetrics() {
     notificationsSent: scalar('SELECT COUNT(*) as c FROM notifications'),
     subscribedCandidates: scalar('SELECT COUNT(*) as c FROM candidate_subscriptions WHERE enabled = 1'),
     crmEmailRepliesDetected: scalar('SELECT COUNT(*) as c FROM crm_email_sync_events'),
+    applicationsSubmittedCount: scalar("SELECT COUNT(*) as c FROM application_submissions WHERE transmitted = 1 OR delivery_status = 'portal_confirmed_by_user'"),
     aiUsage: aiToday,
     sources: listSourceConfigs(),
   };
 }
+
+// -----------------------------------------------------------------------------
+// Real Application Submissions & Verifiable Delivery Receipts
+// -----------------------------------------------------------------------------
+function mapApplicationSubmissionRow(r: any): ApplicationSubmissionRecord {
+  return {
+    id: r.id,
+    userId: r.user_id,
+    recruiterId: r.recruiter_id || '',
+    candidateName: r.candidate_name || '',
+    candidateEmail: r.candidate_email || '',
+    applicationId: r.application_id || '',
+    companyId: r.company_id || '',
+    companyName: r.company_name,
+    roleTitle: r.role_title,
+    opportunityType:
+      r.opportunity_type === 'hidden_opportunity' ? 'hidden_opportunity' : 'published_job',
+    classification: (r.classification || '') as NeedClassification | '',
+    channel: r.channel as ApplicationSubmissionChannel,
+    recipientEmail: r.recipient_email || '',
+    recipientName: r.recipient_name || '',
+    officialUrl: r.official_url || '',
+    subject: r.subject || '',
+    coverLetterPreview: r.cover_letter_preview || '',
+    coverLetterFull: r.cover_letter_full || r.cover_letter_preview || '',
+    cvVersionName: r.cv_version_name || '',
+    attachments: safeJsonParse<Array<{ filename: string; contentType: string; sizeBytes: number }>>(
+      r.attachments_json,
+      []
+    ),
+    explicitAuthorization: Boolean(r.explicit_authorization),
+    authorizationTimestamp: r.authorization_timestamp,
+    transmitted: Boolean(r.transmitted),
+    deliveryStatus: r.delivery_status as ApplicationDeliveryStatus,
+    providerMessageId: r.provider_message_id || '',
+    portalConfirmedAt: r.portal_confirmed_at || null,
+    portalReference: r.portal_reference || '',
+    employerStatus: (r.employer_status || 'received') as EmployerApplicationStatus,
+    employerReply: r.employer_reply || '',
+    employerRepliedAt: r.employer_replied_at || null,
+    errorMessage: r.error_message || '',
+    createdAt: r.created_at,
+    updatedAt: r.updated_at,
+  };
+}
+
+export function createApplicationSubmission(input: {
+  userId: string;
+  recruiterId?: string;
+  candidateName?: string;
+  candidateEmail?: string;
+  applicationId?: string;
+  companyId?: string;
+  companyName: string;
+  roleTitle: string;
+  opportunityType: 'published_job' | 'hidden_opportunity';
+  classification?: NeedClassification | '';
+  channel: ApplicationSubmissionChannel;
+  recipientEmail?: string;
+  recipientName?: string;
+  officialUrl?: string;
+  subject?: string;
+  coverLetterPreview?: string;
+  coverLetterFull?: string;
+  cvVersionName?: string;
+  attachments?: Array<{ filename: string; contentType: string; sizeBytes: number }>;
+  attachmentsData?: Array<{ filename: string; contentType: string; base64Content: string }>;
+  explicitAuthorization: boolean;
+  authorizationTimestamp: string;
+  transmitted: boolean;
+  deliveryStatus: ApplicationDeliveryStatus;
+  providerMessageId?: string;
+  errorMessage?: string;
+}): ApplicationSubmissionRecord {
+  const db = getEngineDb();
+  const id = `sub_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO application_submissions (
+      id, user_id, recruiter_id, candidate_name, candidate_email,
+      application_id, company_id, company_name, role_title,
+      opportunity_type, classification, channel, recipient_email, recipient_name,
+      official_url, subject, cover_letter_preview, cover_letter_full, cv_version_name,
+      attachments_json, attachments_data_json,
+      explicit_authorization, authorization_timestamp, transmitted, delivery_status,
+      provider_message_id, employer_status, error_message, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?)
+  `).run(
+    id,
+    clampStr(input.userId, 128),
+    clampStr(input.recruiterId || '', 128),
+    clampStr(input.candidateName || '', 140),
+    clampStr(input.candidateEmail || '', 200),
+    clampStr(input.applicationId || '', 128),
+    clampStr(input.companyId || '', 128),
+    clampStr(input.companyName, 160),
+    clampStr(input.roleTitle, 180),
+    input.opportunityType,
+    input.classification || '',
+    input.channel,
+    clampStr(input.recipientEmail || '', 200),
+    clampStr(input.recipientName || '', 140),
+    sanitizeHttpUrl(input.officialUrl),
+    clampStr(input.subject || '', 240),
+    clampStr(input.coverLetterPreview || '', 1200),
+    clampStr(input.coverLetterFull || input.coverLetterPreview || '', 10_000),
+    clampStr(input.cvVersionName || '', 160),
+    JSON.stringify((input.attachments || []).slice(0, 5)),
+    JSON.stringify((input.attachmentsData || []).slice(0, 3)),
+    input.explicitAuthorization ? 1 : 0,
+    clampStr(input.authorizationTimestamp, 64),
+    input.transmitted ? 1 : 0,
+    input.deliveryStatus,
+    clampStr(input.providerMessageId || '', 160),
+    clampStr(input.errorMessage || '', 500),
+    now,
+    now
+  );
+  const row = db.prepare('SELECT * FROM application_submissions WHERE id = ?').get(id) as any;
+  return mapApplicationSubmissionRow(row);
+}
+
+export function getApplicationSubmissionById(
+  submissionId: string,
+  userId: string
+): ApplicationSubmissionRecord | null {
+  const db = getEngineDb();
+  const row = db
+    .prepare('SELECT * FROM application_submissions WHERE id = ? AND user_id = ?')
+    .get(submissionId, userId) as any;
+  return row ? mapApplicationSubmissionRow(row) : null;
+}
+
+export function listUserApplicationSubmissions(
+  userId: string,
+  limit = 60
+): ApplicationSubmissionRecord[] {
+  const db = getEngineDb();
+  const rows = db
+    .prepare('SELECT * FROM application_submissions WHERE user_id = ? ORDER BY created_at DESC LIMIT ?')
+    .all(userId, Math.min(200, Math.max(1, limit))) as any[];
+  return rows.map(mapApplicationSubmissionRow);
+}
+
+export function listEmployerReceivedApplications(
+  recruiterId: string,
+  limit = 60
+): ApplicationSubmissionRecord[] {
+  const db = getEngineDb();
+  const rows = db
+    .prepare(
+      "SELECT * FROM application_submissions WHERE recruiter_id = ? AND channel = 'jobfounds_direct' ORDER BY created_at DESC LIMIT ?"
+    )
+    .all(recruiterId, Math.min(200, Math.max(1, limit))) as any[];
+  return rows.map(mapApplicationSubmissionRow);
+}
+
+export function getSubmissionAttachmentForActor(params: {
+  submissionId: string;
+  actorUid: string;
+  attachmentIndex: number;
+}): { filename: string; contentType: string; buffer: Buffer } | null {
+  const db = getEngineDb();
+  const row = db
+    .prepare('SELECT user_id, recruiter_id, attachments_data_json FROM application_submissions WHERE id = ?')
+    .get(params.submissionId) as any;
+  if (!row) return null;
+  if (row.user_id !== params.actorUid && row.recruiter_id !== params.actorUid) {
+    return null;
+  }
+  const items = safeJsonParse<Array<{ filename: string; contentType: string; base64Content: string }>>(
+    row.attachments_data_json,
+    []
+  );
+  const target = items[params.attachmentIndex];
+  if (!target || !target.base64Content) return null;
+  return {
+    filename: target.filename || 'document',
+    contentType: target.contentType || 'application/octet-stream',
+    buffer: Buffer.from(target.base64Content, 'base64'),
+  };
+}
+
+export function respondToEmployerApplication(params: {
+  submissionId: string;
+  recruiterId: string;
+  status: EmployerApplicationStatus;
+  replyMessage: string;
+}): ApplicationSubmissionRecord | null {
+  const db = getEngineDb();
+  const existing = db
+    .prepare(
+      "SELECT * FROM application_submissions WHERE id = ? AND recruiter_id = ? AND channel = 'jobfounds_direct'"
+    )
+    .get(params.submissionId, params.recruiterId) as any;
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE application_submissions
+    SET employer_status = ?,
+        employer_reply = ?,
+        employer_replied_at = ?,
+        updated_at = ?
+    WHERE id = ? AND recruiter_id = ?
+  `).run(
+    params.status,
+    clampStr(params.replyMessage, 4000),
+    now,
+    now,
+    params.submissionId,
+    params.recruiterId
+  );
+  const updated = db
+    .prepare('SELECT * FROM application_submissions WHERE id = ?')
+    .get(params.submissionId) as any;
+  return updated ? mapApplicationSubmissionRow(updated) : null;
+}
+
+export function confirmPortalSubmission(params: {
+  submissionId: string;
+  userId: string;
+  portalReference?: string;
+}): ApplicationSubmissionRecord | null {
+  const db = getEngineDb();
+  const existing = getApplicationSubmissionById(params.submissionId, params.userId);
+  if (!existing) return null;
+  const now = new Date().toISOString();
+  db.prepare(`
+    UPDATE application_submissions
+    SET delivery_status = 'portal_confirmed_by_user',
+        transmitted = 1,
+        portal_confirmed_at = ?,
+        portal_reference = ?,
+        updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `).run(now, clampStr(params.portalReference || '', 140), now, params.submissionId, params.userId);
+  return getApplicationSubmissionById(params.submissionId, params.userId);
+}
+
+// -----------------------------------------------------------------------------
+// SQLite Automated Backup & Rotation (Hostinger Production Reliability)
+// -----------------------------------------------------------------------------
+export interface EngineDbBackupInfo {
+  filename: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
+export function getEngineBackupDir(): string {
+  return path.join(resolveEngineDataDir(), 'backups');
+}
+
+export function listEngineDbBackups(): EngineDbBackupInfo[] {
+  const backupDir = getEngineBackupDir();
+  if (!fs.existsSync(backupDir)) return [];
+  return fs
+    .readdirSync(backupDir)
+    .filter((f) => f.endsWith('.sqlite') && f.startsWith('jobfounds-'))
+    .map((filename) => {
+      const fullPath = path.join(backupDir, filename);
+      const stat = fs.statSync(fullPath);
+      return {
+        filename,
+        sizeBytes: stat.size,
+        createdAt: stat.mtime.toISOString(),
+      };
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+export function createEngineDbBackup(reason = 'scheduled', keepLatest = 7): EngineDbBackupInfo {
+  const db = getEngineDb();
+  const backupDir = getEngineBackupDir();
+  fs.mkdirSync(backupDir, { recursive: true });
+  try {
+    db.exec('PRAGMA wal_checkpoint(TRUNCATE);');
+  } catch {
+    // Non-fatal if another reader holds WAL
+  }
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const safeReason = reason.replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24) || 'backup';
+  const filename = `jobfounds-${stamp}-${safeReason}.sqlite`;
+  const targetPath = path.join(backupDir, filename);
+  fs.copyFileSync(getEngineDbPath(), targetPath);
+
+  // Rotate older backups to bound disk usage
+  const all = listEngineDbBackups();
+  for (const stale of all.slice(Math.max(1, keepLatest))) {
+    try {
+      fs.unlinkSync(path.join(backupDir, stale.filename));
+    } catch {
+      // ignore cleanup error
+    }
+  }
+  const stat = fs.statSync(targetPath);
+  return {
+    filename,
+    sizeBytes: stat.size,
+    createdAt: stat.mtime.toISOString(),
+  };
+}
+
+// =============================================================================
+// AUTHENTICATION ACCOUNTS & 5-DIGIT EMAIL VERIFICATION CODE STORAGE
+// =============================================================================
+
+export interface AuthUserRecord {
+  uid: string;
+  email: string;
+  fullName: string;
+  passwordHash: string;
+  passwordSalt: string;
+  emailVerified: boolean;
+  verifiedAt: string | null;
+  accountRole: 'candidate' | 'recruiter';
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface EmailVerificationCodeRecord {
+  id: string;
+  userId: string;
+  email: string;
+  codeHash: string;
+  codeSalt: string;
+  expiresAt: string;
+  attempts: number;
+  maxAttempts: number;
+  consumedAt: string | null;
+  createdAt: string;
+}
+
+function mapAuthUserRow(row: Record<string, any>): AuthUserRecord {
+  return {
+    uid: String(row.uid),
+    email: String(row.email),
+    fullName: String(row.full_name || ''),
+    passwordHash: String(row.password_hash || ''),
+    passwordSalt: String(row.password_salt || ''),
+    emailVerified: Boolean(row.email_verified),
+    verifiedAt: row.verified_at ? String(row.verified_at) : null,
+    accountRole: row.account_role === 'recruiter' ? 'recruiter' : 'candidate',
+    createdAt: String(row.created_at),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+function mapVerificationCodeRow(row: Record<string, any>): EmailVerificationCodeRecord {
+  return {
+    id: String(row.id),
+    userId: String(row.user_id),
+    email: String(row.email),
+    codeHash: String(row.code_hash),
+    codeSalt: String(row.code_salt),
+    expiresAt: String(row.expires_at),
+    attempts: Number(row.attempts || 0),
+    maxAttempts: Number(row.max_attempts || 5),
+    consumedAt: row.consumed_at ? String(row.consumed_at) : null,
+    createdAt: String(row.created_at),
+  };
+}
+
+export function getAuthUserByEmail(email: string): AuthUserRecord | null {
+  const db = getEngineDb();
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return null;
+  const row = db
+    .prepare('SELECT * FROM auth_users WHERE email = ? LIMIT 1')
+    .get(normalized) as Record<string, any> | undefined;
+  return row ? mapAuthUserRow(row) : null;
+}
+
+export function getAuthUserByUid(uid: string): AuthUserRecord | null {
+  const db = getEngineDb();
+  const cleanUid = uid.trim();
+  if (!cleanUid) return null;
+  const row = db
+    .prepare('SELECT * FROM auth_users WHERE uid = ? LIMIT 1')
+    .get(cleanUid) as Record<string, any> | undefined;
+  return row ? mapAuthUserRow(row) : null;
+}
+
+export function createAuthUserRecord(input: {
+  email: string;
+  fullName: string;
+  passwordHash: string;
+  passwordSalt: string;
+  accountRole?: 'candidate' | 'recruiter';
+}): AuthUserRecord {
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  const uid = `jf_${crypto.randomBytes(12).toString('hex')}`;
+  const email = input.email.trim().toLowerCase();
+  const fullName = clampStr(input.fullName, 120) || email.split('@')[0];
+  const accountRole = input.accountRole === 'recruiter' ? 'recruiter' : 'candidate';
+
+  db.prepare(
+    `INSERT INTO auth_users (
+      uid, email, full_name, password_hash, password_salt,
+      email_verified, verified_at, account_role, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, 0, NULL, ?, ?, ?)`
+  ).run(uid, email, fullName, input.passwordHash, input.passwordSalt, accountRole, now, now);
+
+  return getAuthUserByUid(uid)!;
+}
+
+export function markAuthUserEmailVerified(uid: string): AuthUserRecord | null {
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  db.prepare(
+    'UPDATE auth_users SET email_verified = 1, verified_at = ?, updated_at = ? WHERE uid = ?'
+  ).run(now, now, uid);
+  return getAuthUserByUid(uid);
+}
+
+export function deleteAuthUserByUid(uid: string): void {
+  const db = getEngineDb();
+  db.prepare('DELETE FROM auth_users WHERE uid = ?').run(uid);
+}
+
+export function createEmailVerificationCodeRecord(input: {
+  userId: string;
+  email: string;
+  codeHash: string;
+  codeSalt: string;
+  expiresAt: string;
+  maxAttempts?: number;
+}): EmailVerificationCodeRecord {
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  const id = `evc_${crypto.randomBytes(10).toString('hex')}`;
+  const email = input.email.trim().toLowerCase();
+  const maxAttempts = Math.max(1, Math.min(10, input.maxAttempts ?? 5));
+
+  // Invalidate any prior unconsumed codes for this user
+  db.prepare(
+    'UPDATE email_verification_codes SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL'
+  ).run(now, input.userId);
+
+  db.prepare(
+    `INSERT INTO email_verification_codes (
+      id, user_id, email, code_hash, code_salt, expires_at, attempts, max_attempts, consumed_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)`
+  ).run(id, input.userId, email, input.codeHash, input.codeSalt, input.expiresAt, maxAttempts, now);
+
+  const row = db
+    .prepare('SELECT * FROM email_verification_codes WHERE id = ? LIMIT 1')
+    .get(id) as Record<string, any>;
+  return mapVerificationCodeRow(row);
+}
+
+export function getLatestActiveVerificationCode(
+  userId: string
+): EmailVerificationCodeRecord | null {
+  const db = getEngineDb();
+  const row = db
+    .prepare(
+      `SELECT * FROM email_verification_codes
+       WHERE user_id = ? AND consumed_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(userId) as Record<string, any> | undefined;
+  return row ? mapVerificationCodeRow(row) : null;
+}
+
+export function getLatestVerificationCodeAny(
+  userId: string
+): EmailVerificationCodeRecord | null {
+  const db = getEngineDb();
+  const row = db
+    .prepare(
+      `SELECT * FROM email_verification_codes
+       WHERE user_id = ?
+       ORDER BY created_at DESC LIMIT 1`
+    )
+    .get(userId) as Record<string, any> | undefined;
+  return row ? mapVerificationCodeRow(row) : null;
+}
+
+export function incrementVerificationCodeAttempts(codeId: string): number {
+  const db = getEngineDb();
+  db.prepare(
+    'UPDATE email_verification_codes SET attempts = attempts + 1 WHERE id = ?'
+  ).run(codeId);
+  const row = db
+    .prepare('SELECT attempts FROM email_verification_codes WHERE id = ? LIMIT 1')
+    .get(codeId) as { attempts?: number } | undefined;
+  return Number(row?.attempts || 0);
+}
+
+export function consumeVerificationCode(codeId: string): void {
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  db.prepare('UPDATE email_verification_codes SET consumed_at = ? WHERE id = ?').run(now, codeId);
+}
+

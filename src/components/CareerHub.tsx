@@ -6,11 +6,14 @@ import {
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clock,
+  FileCheck2,
   Globe2,
   Info,
   Loader2,
   Mail,
   MessageSquareText,
+  Paperclip,
   Play,
   Plus,
   RefreshCw,
@@ -32,6 +35,7 @@ import {
 } from 'recharts';
 import {
   ApplicationStage,
+  ApplicationSubmissionRecord,
   CandidateProfile,
   CrmEmailSyncEvent,
   CvDocument,
@@ -43,6 +47,8 @@ import {
 } from '../types';
 import { L, t } from '../i18n';
 import {
+  confirmPortalApplicationSubmission,
+  fetchApplicationSubmissions,
   fetchCrmEmailSyncHistory,
   fetchSalaryVisaIntel,
   generateInterviewPrep,
@@ -58,6 +64,7 @@ import {
 import { safeExternalUrl } from '../utils/safeUrl';
 import { LiveVoiceCoach } from './LiveVoiceCoach';
 import { CareerLocationMapHub } from './CareerLocationMapHub';
+import type { ApplicationModalTarget } from './ApplicationSubmissionModal';
 
 function parseSalaryNumeric(raw: string): number {
   if (!raw) return 0;
@@ -82,11 +89,14 @@ function parseSalaryNumeric(raw: string): number {
 
 interface CareerHubProps {
   lang: Lang;
+  signedIn?: boolean;
+  onRequireSignIn?: () => void;
   profile: CandidateProfile;
   cvVersions?: CvDocument[];
   applications: TrackedApplication[];
   onSaveApplication: (app: TrackedApplication) => void;
   onDeleteApplication: (id: string) => void;
+  onOpenApplyModal?: (target: ApplicationModalTarget) => void;
   openAddFormSignal: number;
   initialSubTab?: 'tracker' | 'interview' | 'mobility';
   subTabTrigger?: number;
@@ -132,11 +142,14 @@ function daysBetween(isoDate?: string): number | null {
 
 export function CareerHub({
   lang,
+  signedIn = false,
+  onRequireSignIn,
   profile,
   cvVersions = [],
   applications,
   onSaveApplication,
   onDeleteApplication,
+  onOpenApplyModal,
   initialSubTab = 'tracker',
   subTabTrigger = 0,
 }: CareerHubProps) {
@@ -175,18 +188,63 @@ export function CareerHub({
   const [gmailEvents, setGmailEvents] = useState<CrmEmailSyncEvent[]>([]);
   const [showGmailHistory, setShowGmailHistory] = useState(false);
 
+  // Persisted Server Application Receipts (Real Delivery Proofs & 2-Step Portal Confirmations)
+  const [submissions, setSubmissions] = useState<ApplicationSubmissionRecord[]>([]);
+  const [confirmingSubId, setConfirmingSubId] = useState<string | null>(null);
+  const [showReceipts, setShowReceipts] = useState(false);
+
   useEffect(() => {
     fetchCrmEmailSyncHistory(30)
       .then((res) => setGmailEvents(res.events || []))
       .catch(() => {
         // user may not be signed in yet
       });
-  }, []);
+    if (signedIn) {
+      fetchApplicationSubmissions(50)
+        .then((res) => {
+          const loaded = res.submissions || [];
+          setSubmissions(loaded);
+          // Sync employer replies on direct JOBFOUNDS submissions back into the candidate's CRM automatically
+          const stageMap: Record<string, ApplicationStage> = {
+            under_review: 'Under Review',
+            interview_scheduled: 'Interview Scheduled',
+            offer_received: 'Offer Received',
+            rejected: 'Rejected',
+            message_received: 'Message Received',
+          };
+          for (const sub of loaded) {
+            if (!sub.employerReply || !sub.employerRepliedAt) continue;
+            const targetStage = stageMap[sub.employerStatus || ''] || 'Message Received';
+            const matchApp = applications.find(
+              (a) =>
+                a.submissionId === sub.id ||
+                (a.company.toLowerCase() === sub.companyName.toLowerCase() &&
+                  a.role.toLowerCase() === sub.roleTitle.toLowerCase())
+            );
+            if (
+              matchApp &&
+              (matchApp.responseSummary !== sub.employerReply || matchApp.stage !== targetStage)
+            ) {
+              onSaveApplication({
+                ...matchApp,
+                stage: targetStage,
+                responseReceived: true,
+                responseSummary: sub.employerReply,
+                responseSource: 'in_app_message',
+              });
+            }
+          }
+        })
+        .catch(() => {
+          // ignore if unauthenticated
+        });
+    }
+  }, [signedIn, applications.length]);
 
   // Interview Tab Mode: Live Voice Coach, Text Simulator, or Structured Prep Brief
   const [interviewMode, setInterviewMode] = useState<'voice' | 'simulator' | 'brief'>('voice');
   const [intRole, setIntRole] = useState(applications[0]?.role ?? profile.currentTitle);
-  const [intCompany, setIntCompany] = useState(applications[0]?.company ?? 'Qonto');
+  const [intCompany, setIntCompany] = useState(applications[0]?.company ?? '');
   const [intDetails, setIntDetails] = useState(applications[0]?.notes ?? '');
   const [intLoading, setIntLoading] = useState(false);
   const [intError, setIntError] = useState<string | null>(null);
@@ -200,9 +258,11 @@ export function CareerHub({
 
   // Salary & Visa Intelligence state
   const [mobRole, setMobRole] = useState(profile.currentTitle);
-  const [mobExp, setMobExp] = useState(`${profile.yearsExperience} ans / Senior`);
-  const [mobCountry, setMobCountry] = useState('Suisse');
-  const [mobCity, setMobCity] = useState('Zurich');
+  const [mobExp, setMobExp] = useState(
+    profile.yearsExperience > 0 ? `${profile.yearsExperience} ans` : ''
+  );
+  const [mobCountry, setMobCountry] = useState(profile.preferredCountries[0] ?? '');
+  const [mobCity, setMobCity] = useState('');
   const [mobOrigin, setMobOrigin] = useState(profile.originCountry);
   const [mobLoading, setMobLoading] = useState(false);
   const [mobError, setMobError] = useState<string | null>(null);
@@ -275,7 +335,54 @@ export function CareerHub({
     setShowAdd(false);
   };
 
-  const handleAuthorizeAndMarkSent = (app: TrackedApplication) => {
+  const handleConfirmExternalPortalReceipt = async (sub: ApplicationSubmissionRecord) => {
+    setConfirmingSubId(sub.id);
+    try {
+      const res = await confirmPortalApplicationSubmission(sub.id);
+      setSubmissions((prev) => prev.map((s) => (s.id === sub.id ? res.submission : s)));
+      const matchingApp = applications.find(
+        (a) =>
+          a.submissionId === sub.id ||
+          (a.company.toLowerCase() === sub.companyName.toLowerCase() &&
+            a.role.toLowerCase() === sub.roleTitle.toLowerCase())
+      );
+      if (matchingApp) {
+        const today = new Date().toISOString().slice(0, 10);
+        onSaveApplication({
+          ...matchingApp,
+          submissionId: sub.id,
+          deliveryStatus: 'portal_confirmed_by_user',
+          deliveryChannel: 'official_portal',
+          approvalStatus: 'approved_by_user',
+          stage: 'Application Sent',
+          sentDate: matchingApp.sentDate || today,
+        });
+      }
+    } catch {
+      // handled silently
+    } finally {
+      setConfirmingSubId(null);
+    }
+  };
+
+  const handleOpenRealSubmitFromCrm = (app: TrackedApplication) => {
+    if (onOpenApplyModal) {
+      onOpenApplyModal({
+        companyId: app.companyId,
+        companyName: app.company,
+        roleTitle: app.role,
+        location: app.location || 'International',
+        opportunityType: app.type === 'Spontaneous' ? 'hidden_opportunity' : 'published_job',
+        classification: app.type === 'Spontaneous' ? 'probable_hiring_signal' : 'confirmed_job',
+        officialUrl: app.sourceUrl,
+        recommendedContactName: app.contactName,
+        recommendedContactRole: app.contactRole,
+        recommendedContactEmail:
+          app.contactChannel && app.contactChannel.includes('@') ? app.contactChannel : '',
+        signalReason: app.type === 'Spontaneous' ? app.notes : undefined,
+      });
+      return;
+    }
     const today = new Date().toISOString().slice(0, 10);
     const defaultFollowUp =
       app.followUpDate || new Date(Date.now() + 7 * 86_400_000).toISOString().slice(0, 10);
@@ -285,10 +392,6 @@ export function CareerHub({
       stage: 'Application Sent',
       sentDate: app.sentDate || today,
       followUpDate: defaultFollowUp,
-      nextAction:
-        lang === 'fr'
-          ? `Relance polie prévue le ${defaultFollowUp} si aucune réponse`
-          : `Polite follow-up scheduled for ${defaultFollowUp} if no reply`,
     });
   };
 
@@ -631,7 +734,20 @@ export function CareerHub({
                   </span>
                 )}
 
-                {!gmailConnectedEmail ? (
+                {!signedIn ? (
+                  <button
+                    type="button"
+                    onClick={() => onRequireSignIn?.()}
+                    className="px-3.5 py-2 rounded-lg bg-jf-navy hover:bg-jf-dark text-white font-semibold inline-flex items-center gap-2 transition-colors whitespace-nowrap"
+                  >
+                    <ShieldCheck className="w-3.5 h-3.5 text-jf-sky" />
+                    <span>
+                      {lang === 'fr'
+                        ? 'Connexion Google requise (CRM & Gmail)'
+                        : 'Google Sign-In Required (CRM & Gmail)'}
+                    </span>
+                  </button>
+                ) : !gmailConnectedEmail ? (
                   <button
                     type="button"
                     onClick={handleConnectGmail}
@@ -649,7 +765,7 @@ export function CareerHub({
                       </svg>
                     )}
                     <span>
-                      {lang === 'fr' ? 'Connecter Gmail (lecture seule)' : 'Connect Gmail (Read-Only)'}
+                      {lang === 'fr' ? 'Autoriser Gmail (lecture seule)' : 'Authorize Gmail (Read-Only)'}
                     </span>
                   </button>
                 ) : (
@@ -702,6 +818,19 @@ export function CareerHub({
                     </span>
                   </button>
                 )}
+
+                {submissions.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowReceipts((v) => !v)}
+                    className="px-3 py-2 rounded-lg bg-white border border-jf-border text-jf-navy hover:bg-jf-soft font-medium inline-flex items-center gap-1.5 whitespace-nowrap"
+                  >
+                    <FileCheck2 className="w-3.5 h-3.5 text-jf-blue" />
+                    <span>
+                      {lang === 'fr' ? 'Reçus d’envoi vérifiés' : 'Verified Receipts'} ({submissions.length})
+                    </span>
+                  </button>
+                )}
               </div>
             </div>
 
@@ -713,6 +842,127 @@ export function CareerHub({
             {gmailError && (
               <div className="p-2.5 bg-red-50 border border-red-200 rounded-lg text-red-700">
                 {gmailError}
+              </div>
+            )}
+
+            {showReceipts && submissions.length > 0 && (
+              <div className="pt-2 border-t border-jf-border space-y-2">
+                <div className="text-[11px] font-semibold uppercase tracking-wide text-jf-dark">
+                  {lang === 'fr'
+                    ? 'Preuves d’envoi serveur & confirmations portail officiel'
+                    : 'Server Delivery Receipts & Official Portal Confirmations'}
+                </div>
+                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                  {submissions.map((sub) => {
+                    const isTransmitted =
+                      sub.deliveryStatus === 'transmitted_email' ||
+                      sub.deliveryStatus === 'transmitted_jobfounds_portal' ||
+                      sub.deliveryStatus === 'portal_confirmed_by_user';
+                    const isAwaitingPortal = sub.deliveryStatus === 'awaiting_portal_confirmation';
+                    const portalHref = safeExternalUrl(sub.officialUrl);
+                    return (
+                      <div
+                        key={sub.id}
+                        className="p-3 bg-white border border-jf-border rounded-lg flex flex-col sm:flex-row sm:items-center justify-between gap-2.5"
+                      >
+                        <div className="min-w-0 space-y-0.5">
+                          <div className="font-semibold text-jf-navy flex flex-wrap items-center gap-2">
+                            <span className="truncate">
+                              {sub.companyName} — {sub.roleTitle}
+                            </span>
+                            <span
+                              className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                                isTransmitted
+                                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                  : isAwaitingPortal
+                                    ? 'bg-amber-50 text-amber-800 border border-amber-200'
+                                    : 'bg-red-50 text-red-700 border border-red-200'
+                              }`}
+                            >
+                              {sub.deliveryStatus === 'transmitted_email'
+                                ? lang === 'fr'
+                                  ? 'E-mail transmis (Resend)'
+                                  : 'Email transmitted'
+                                : sub.deliveryStatus === 'transmitted_jobfounds_portal'
+                                  ? lang === 'fr'
+                                    ? 'Direct JOBFOUNDS transmis'
+                                    : 'JOBFOUNDS Direct sent'
+                                  : sub.deliveryStatus === 'portal_confirmed_by_user'
+                                    ? lang === 'fr'
+                                      ? 'Confirmé portail officiel'
+                                      : 'Confirmed official portal'
+                                    : isAwaitingPortal
+                                      ? lang === 'fr'
+                                        ? 'En attente de soumission portail'
+                                        : 'Awaiting portal submission'
+                                      : lang === 'fr'
+                                        ? 'Échec transmission'
+                                        : 'Delivery failed'}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-slate-600 flex flex-wrap items-center gap-x-2">
+                            <span>{sub.createdAt.slice(0, 16).replace('T', ' ')}</span>
+                            {sub.recipientEmail && <span>· {sub.recipientEmail}</span>}
+                            {sub.providerMessageId && (
+                              <span className="font-mono text-jf-blue">· ID: {sub.providerMessageId}</span>
+                            )}
+                            {sub.attachments.length > 0 && (
+                              <span className="inline-flex items-center gap-1">
+                                <Paperclip className="w-3 h-3" />
+                                {sub.attachments.map((a) => a.filename).join(', ')}
+                              </span>
+                            )}
+                          </div>
+                          {(sub.errorMessage || sub.portalReference) && (
+                            <div className="text-[11px] text-slate-500">
+                              {sub.errorMessage || sub.portalReference}
+                            </div>
+                          )}
+                          {sub.employerReply && (
+                            <div className="mt-1.5 p-2 rounded-md bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900">
+                              <span className="font-semibold">
+                                {lang === 'fr' ? 'Réponse employeur' : 'Employer reply'} ({sub.employerStatus || 'message_received'}) :
+                              </span>{' '}
+                              {sub.employerReply}
+                            </div>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          {isAwaitingPortal && portalHref && (
+                            <a
+                              href={portalHref}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="px-2.5 py-1.5 text-[11px] font-medium text-jf-blue border border-jf-border rounded-lg hover:bg-jf-ice inline-flex items-center gap-1"
+                            >
+                              <span>{lang === 'fr' ? 'Ouvrir portail' : 'Open Portal'}</span>
+                              <ArrowUpRight className="w-3 h-3" />
+                            </a>
+                          )}
+                          {isAwaitingPortal && (
+                            <button
+                              type="button"
+                              disabled={confirmingSubId === sub.id}
+                              onClick={() => void handleConfirmExternalPortalReceipt(sub)}
+                              className="px-2.5 py-1.5 text-[11px] font-semibold text-white bg-jf-navy hover:bg-jf-dark rounded-lg inline-flex items-center gap-1 disabled:opacity-60"
+                            >
+                              {confirmingSubId === sub.id ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <CheckCircle2 className="w-3 h-3" />
+                              )}
+                              <span>
+                                {lang === 'fr'
+                                  ? 'Confirmer soumission effectuée'
+                                  : 'Confirm Submitted'}
+                              </span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
             )}
 
@@ -983,6 +1233,30 @@ export function CareerHub({
                                 ? 'Offre publiée'
                                 : 'Published Job'}
                           </span>
+                          {app.deliveryStatus === 'transmitted_email' && (
+                            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 inline-flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>{lang === 'fr' ? 'E-mail transmis' : 'Email Sent'}</span>
+                            </span>
+                          )}
+                          {app.deliveryStatus === 'transmitted_jobfounds_portal' && (
+                            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-emerald-50 text-emerald-800 border border-emerald-200 inline-flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>{lang === 'fr' ? 'Direct transmis' : 'Direct Sent'}</span>
+                            </span>
+                          )}
+                          {app.deliveryStatus === 'portal_confirmed_by_user' && (
+                            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-jf-soft text-jf-navy border border-jf-sky inline-flex items-center gap-1">
+                              <CheckCircle2 className="w-3 h-3" />
+                              <span>{lang === 'fr' ? 'Portail confirmé' : 'Portal Confirmed'}</span>
+                            </span>
+                          )}
+                          {app.deliveryStatus === 'awaiting_portal_confirmation' && (
+                            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 inline-flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              <span>{lang === 'fr' ? 'Portail non confirmé' : 'Portal Pending'}</span>
+                            </span>
+                          )}
                           {app.responseReceived && (
                             <span className="text-[11px] font-semibold px-2 py-0.5 rounded bg-jf-navy text-jf-sky inline-flex items-center gap-1">
                               <CheckCircle2 className="w-3 h-3" />
@@ -999,6 +1273,11 @@ export function CareerHub({
                           )}
                           {app.contactName && <span>· RH: {app.contactName}</span>}
                           {app.cvVersionName && <span>· CV: {app.cvVersionName}</span>}
+                          {app.attachmentNames && app.attachmentNames.length > 0 && (
+                            <span className="inline-flex items-center gap-1">
+                              · <Paperclip className="w-3 h-3" /> {app.attachmentNames.length}
+                            </span>
+                          )}
                         </div>
                         {app.nextAction && (
                           <div className="text-xs text-jf-blue font-medium">
@@ -1009,17 +1288,19 @@ export function CareerHub({
                       </div>
 
                       <div className="flex flex-wrap items-center gap-2 shrink-0">
-                        {needsApproval && (
+                        {(needsApproval ||
+                          currentStage === 'Opportunity Identified' ||
+                          currentStage === 'Application Prepared') && (
                           <button
                             type="button"
-                            onClick={() => handleAuthorizeAndMarkSent(app)}
+                            onClick={() => handleOpenRealSubmitFromCrm(app)}
                             className="px-3 py-1.5 text-xs font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover rounded-lg inline-flex items-center gap-1.5"
                           >
                             <ShieldCheck className="w-3.5 h-3.5" />
                             <span>
                               {lang === 'fr'
-                                ? 'Autoriser et marquer envoyée'
-                                : 'Authorize & Mark Sent'}
+                                ? 'Préparer / Envoyer'
+                                : 'Prepare & Submit'}
                             </span>
                           </button>
                         )}
