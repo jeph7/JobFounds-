@@ -95,6 +95,8 @@ export interface AppAuthUser {
 }
 
 export function authRegisterWithPassword(payload: {
+  firstName?: string;
+  lastName?: string;
   fullName: string;
   email: string;
   password: string;

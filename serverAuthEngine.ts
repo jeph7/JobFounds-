@@ -487,13 +487,21 @@ export function createAuthRouter(): express.Router {
   // 1. POST /api/auth/register — Create unverified account + send 5-digit code by email
   router.post('/auth/register', registerLimiter, async (req, res) => {
     try {
-      const fullName = clampStr(req.body?.fullName, 120);
+      const firstName = clampStr(req.body?.firstName, 60);
+      const lastName = clampStr(req.body?.lastName, 60);
+      const rawFullName = clampStr(req.body?.fullName, 120);
+      const fullName =
+        firstName || lastName ? clampStr(`${firstName} ${lastName}`.trim(), 120) : rawFullName;
       const email = clampStr(req.body?.email, 200).toLowerCase();
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
       const accountRole = req.body?.accountRole === 'recruiter' ? 'recruiter' : 'candidate';
 
+      if ((req.body?.firstName !== undefined || req.body?.lastName !== undefined) && (!lastName || !firstName)) {
+        res.status(400).json({ error: 'Veuillez renseigner votre nom et votre prénom.' });
+        return;
+      }
       if (!fullName || fullName.length < 2) {
-        res.status(400).json({ error: 'Veuillez saisir votre nom complet (au moins 2 caractères).' });
+        res.status(400).json({ error: 'Veuillez renseigner votre nom et votre prénom.' });
         return;
       }
       if (!EMAIL_REGEX.test(email)) {

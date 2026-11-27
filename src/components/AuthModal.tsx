@@ -10,7 +10,6 @@ import {
   Mail,
   RefreshCw,
   ShieldCheck,
-  User as UserIcon,
   X,
 } from 'lucide-react';
 import { Lang } from '../types';
@@ -50,7 +49,7 @@ function getPasswordStrength(password: string, isFr: boolean): {
   if (score <= 1) {
     return {
       level: 1,
-      label: isFr ? 'Faible (min. 8 caractères)' : 'Weak (min. 8 chars)',
+      label: isFr ? 'Faible — minimum 8 caractères' : 'Weak — minimum 8 characters',
       color: 'bg-rose-500',
     };
   }
@@ -63,7 +62,7 @@ function getPasswordStrength(password: string, isFr: boolean): {
   }
   return {
     level: 3,
-    label: isFr ? 'Fort' : 'Strong',
+    label: isFr ? 'Sécurisé' : 'Strong',
     color: 'bg-emerald-600',
   };
 }
@@ -81,7 +80,8 @@ export function AuthModal({
   const isFr = lang === 'fr';
 
   const [mode, setMode] = useState<AuthModalMode>(initialMode);
-  const [fullName, setFullName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [firstName, setFirstName] = useState('');
   const [email, setEmail] = useState(pendingEmail);
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -140,12 +140,18 @@ export function AuthModal({
     setSuccessMsg(null);
   };
 
+  const switchMode = (next: AuthModalMode) => {
+    setMode(next);
+    setShowPassword(false);
+    setShowConfirmPassword(false);
+    resetFormErrors();
+  };
+
   const handleDigitChange = (index: number, rawVal: string) => {
     const clean = rawVal.replace(/\D/g, '');
     resetFormErrors();
 
     if (clean.length > 1) {
-      // Handle pasting multiple digits
       const next = [...digits];
       for (let i = 0; i < 5; i += 1) {
         next[i] = clean[i] || '';
@@ -190,19 +196,24 @@ export function AuthModal({
     e.preventDefault();
     resetFormErrors();
 
-    const trimmedName = fullName.trim();
+    const trimmedLast = lastName.trim();
+    const trimmedFirst = firstName.trim();
     const trimmedEmail = email.trim().toLowerCase();
 
-    if (trimmedName.length < 2) {
+    if (!trimmedLast || !trimmedFirst) {
       setError(
         isFr
-          ? 'Veuillez entrer votre nom complet (au moins 2 caractères).'
-          : 'Please enter your full name (at least 2 characters).'
+          ? 'Veuillez renseigner votre nom et votre prénom.'
+          : 'Please enter both your last name and first name.'
       );
       return;
     }
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(trimmedEmail)) {
-      setError(isFr ? 'Veuillez entrer une adresse e-mail valide.' : 'Please enter a valid email address.');
+      setError(
+        isFr
+          ? 'Veuillez saisir une adresse e-mail valide.'
+          : 'Please enter a valid email address.'
+      );
       return;
     }
     if (password.length < 8) {
@@ -215,20 +226,24 @@ export function AuthModal({
     }
     if (password !== confirmPassword) {
       setError(
-        isFr ? 'Les deux mots de passe ne correspondent pas.' : 'Passwords do not match.'
+        isFr
+          ? 'Les deux mots de passe ne correspondent pas.'
+          : 'Passwords do not match.'
       );
       return;
     }
 
     setLoading(true);
     try {
+      const fullName = `${trimmedFirst} ${trimmedLast}`.trim();
       const res = await authRegisterWithPassword({
-        fullName: trimmedName,
+        firstName: trimmedFirst,
+        lastName: trimmedLast,
+        fullName,
         email: trimmedEmail,
         password,
       });
 
-      // Store unverified token in memory ONLY for calling verify/resend; workspace stays LOCKED
       setAppSessionToken(res.token);
       onUnverifiedSession(res.user, res.token);
 
@@ -368,9 +383,12 @@ export function AuthModal({
     }
   };
 
+  const inputBaseClass =
+    'w-full py-2.5 text-sm bg-white border border-jf-border rounded-lg text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/25 focus:border-jf-blue transition-colors';
+
   return (
     <div
-      className="fixed inset-0 z-50 bg-jf-navy/70 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto"
+      className="fixed inset-0 z-50 bg-jf-navy/65 backdrop-blur-xs flex items-center justify-center p-4"
       onClick={onClose}
     >
       <div
@@ -378,68 +396,35 @@ export function AuthModal({
         aria-modal="true"
         aria-labelledby="jf-auth-modal-title"
         onClick={(e) => e.stopPropagation()}
-        className="w-full max-w-md bg-white border border-jf-border rounded-2xl shadow-2xl overflow-hidden my-auto"
+        className="w-full max-w-[460px] max-h-[94vh] overflow-y-auto bg-white border border-jf-border rounded-2xl shadow-2xl flex flex-col"
       >
-        {/* Modal Header */}
-        <div className="px-6 pt-5 pb-4 bg-gradient-to-b from-[#F4F8FC] to-white border-b border-jf-border flex items-center justify-between">
+        {/* Clean Brand Header */}
+        <div className="px-6 py-4 border-b border-jf-border/80 flex items-center justify-between shrink-0">
           <BrandLogo size="sm" />
           <button
             type="button"
             onClick={onClose}
             aria-label={isFr ? 'Fermer' : 'Close'}
-            className="p-1.5 rounded-lg text-slate-500 hover:bg-jf-ice hover:text-jf-navy transition-colors"
+            className="p-1.5 rounded-lg text-slate-400 hover:bg-jf-ice hover:text-jf-navy focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-jf-blue transition-colors"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-6 sm:p-7 space-y-5">
-          {/* Mode Switcher Tabs (Hidden while verifying 5-digit code) */}
-          {mode !== 'verify' && (
-            <div className="grid grid-cols-2 p-1 bg-jf-ice rounded-xl border border-jf-border">
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('register');
-                  resetFormErrors();
-                }}
-                className={`py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all ${
-                  mode === 'register'
-                    ? 'bg-white text-jf-navy shadow-xs border border-jf-border/80'
-                    : 'text-slate-600 hover:text-jf-navy'
-                }`}
-              >
-                {isFr ? 'Créer un compte' : 'Create Account'}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setMode('login');
-                  resetFormErrors();
-                }}
-                className={`py-2 text-xs sm:text-sm font-semibold rounded-lg transition-all ${
-                  mode === 'login'
-                    ? 'bg-white text-jf-navy shadow-xs border border-jf-border/80'
-                    : 'text-slate-600 hover:text-jf-navy'
-                }`}
-              >
-                {isFr ? 'Se connecter' : 'Sign In'}
-              </button>
-            </div>
-          )}
-
-          {/* Heading */}
+        {/* Main Body */}
+        <div className="px-6 py-5 sm:px-7 sm:py-6 space-y-4">
+          {/* Page Title */}
           {mode === 'register' && (
             <div className="space-y-1">
               <h2
                 id="jf-auth-modal-title"
-                className="font-display text-xl font-bold text-jf-navy tracking-tight"
+                className="font-display text-xl sm:text-[22px] font-bold text-jf-navy tracking-tight leading-snug"
               >
-                {isFr ? 'Créez votre compte JOBFOUNDS' : 'Create your JOBFOUNDS account'}
+                {isFr ? 'Créer un compte' : 'Create an account'}
               </h2>
-              <p className="text-xs sm:text-sm text-slate-600">
+              <p className="text-xs sm:text-[13px] text-slate-600 leading-relaxed">
                 {isFr
-                  ? 'Un code de confirmation à 5 chiffres sera envoyé à votre e-mail pour valider votre compte.'
+                  ? 'Un code de confirmation à 5 chiffres vous sera envoyé par e-mail pour valider votre compte.'
                   : 'A 5-digit confirmation code will be emailed to validate your account.'}
               </p>
             </div>
@@ -449,22 +434,22 @@ export function AuthModal({
             <div className="space-y-1">
               <h2
                 id="jf-auth-modal-title"
-                className="font-display text-xl font-bold text-jf-navy tracking-tight"
+                className="font-display text-xl sm:text-[22px] font-bold text-jf-navy tracking-tight leading-snug"
               >
-                {isFr ? 'Connexion à votre espace' : 'Sign in to your workspace'}
+                {isFr ? 'Se connecter' : 'Sign in'}
               </h2>
-              <p className="text-xs sm:text-sm text-slate-600">
+              <p className="text-xs sm:text-[13px] text-slate-600 leading-relaxed">
                 {isFr
-                  ? 'Accédez à vos offres vérifiées, CV ATS, alertes et suivi de candidatures.'
-                  : 'Access verified jobs, ATS CVs, alerts, and your application tracker.'}
+                  ? 'Accédez à votre espace JOBFOUNDS : offres vérifiées, CV ATS et suivi de candidatures.'
+                  : 'Access your JOBFOUNDS workspace: verified jobs, ATS CVs, and application tracker.'}
               </p>
             </div>
           )}
 
           {mode === 'verify' && (
-            <div className="space-y-2 text-center">
-              <div className="mx-auto w-12 h-12 rounded-2xl bg-jf-blue/10 border border-jf-blue/25 flex items-center justify-center text-jf-blue">
-                <KeyRound className="w-6 h-6" />
+            <div className="space-y-2 text-center pt-1">
+              <div className="mx-auto w-11 h-11 rounded-xl bg-jf-blue/10 border border-jf-blue/20 flex items-center justify-center text-jf-blue">
+                <KeyRound className="w-5 h-5" />
               </div>
               <h2
                 id="jf-auth-modal-title"
@@ -472,12 +457,12 @@ export function AuthModal({
               >
                 {isFr ? 'Confirmation par code à 5 chiffres' : '5-Digit Email Verification'}
               </h2>
-              <p className="text-xs sm:text-sm text-slate-600 leading-relaxed">
+              <p className="text-xs sm:text-[13px] text-slate-600 leading-relaxed">
                 {isFr ? (
                   <>
                     Saisissez le code à <strong>5 chiffres</strong> envoyé à{' '}
                     <span className="font-semibold text-jf-navy break-all">{verifyEmailTarget}</span>.
-                    Sans ce code, votre compte n’est pas encore validé.
+                    Sans ce code, votre compte ne sera pas validé.
                   </>
                 ) : (
                   <>
@@ -492,9 +477,9 @@ export function AuthModal({
 
           {/* Email Delivery Status Banner (Verify Step) */}
           {mode === 'verify' && emailDeliveryOk === false && emailDeliveryNotice && (
-            <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
+            <div className="p-3 rounded-lg bg-amber-50 border border-amber-200 text-amber-900 text-xs flex items-start gap-2.5">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-600" />
-              <div className="space-y-1">
+              <div className="space-y-0.5">
                 <div className="font-semibold">
                   {isFr ? 'Envoi d’e-mail bloqué sur le serveur' : 'Email delivery issue on server'}
                 </div>
@@ -504,21 +489,21 @@ export function AuthModal({
           )}
 
           {mode === 'verify' && emailDeliveryOk === true && (
-            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2">
+            <div className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-900 text-xs flex items-start gap-2">
               <ShieldCheck className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
               <span>
                 {isFr
-                  ? 'E-mail envoyé ! Vérifiez votre boîte de réception (et vos courriers indésirables). Validité : 15 minutes.'
-                  : 'Email sent! Check your inbox (and spam folder). Valid for 15 minutes.'}
+                  ? 'E-mail envoyé. Vérifiez votre boîte de réception (et vos courriers indésirables). Validité : 15 minutes.'
+                  : 'Email sent. Check your inbox (and spam folder). Valid for 15 minutes.'}
               </span>
             </div>
           )}
 
-          {/* Error & Success Feedback */}
+          {/* Error & Success Alerts */}
           {error && (
             <div
               role="alert"
-              className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-start gap-2"
+              className="p-3 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 text-xs font-medium flex items-start gap-2"
             >
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-600" />
               <span>{error}</span>
@@ -528,39 +513,57 @@ export function AuthModal({
           {successMsg && (
             <div
               role="status"
-              className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-start gap-2"
+              className="p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-medium flex items-start gap-2"
             >
               <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
               <span>{successMsg}</span>
             </div>
           )}
 
-          {/* REGISTER FORM */}
+          {/* REGISTER FORM — Dedicated, Separate Nom & Prénom Fields */}
           {mode === 'register' && (
-            <form onSubmit={handleRegisterSubmit} className="space-y-4">
-              <div className="space-y-1.5">
-                <label htmlFor="auth-fullname" className="block text-xs font-semibold text-jf-navy">
-                  {isFr ? 'Nom complet' : 'Full Name'}
-                </label>
-                <div className="relative">
-                  <UserIcon className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+            <form onSubmit={handleRegisterSubmit} className="space-y-3.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="space-y-1">
+                  <label htmlFor="auth-lastname" className="block text-xs font-semibold text-jf-navy">
+                    {isFr ? 'Nom' : 'Last Name'}
+                  </label>
                   <input
-                    id="auth-fullname"
+                    id="auth-lastname"
                     type="text"
                     required
-                    autoComplete="name"
-                    value={fullName}
+                    autoComplete="family-name"
+                    value={lastName}
                     onChange={(e) => {
-                      setFullName(e.target.value);
+                      setLastName(e.target.value);
                       resetFormErrors();
                     }}
-                    placeholder={isFr ? 'Ex. Jean-Marc Pierre' : 'e.g. Alex Morgan'}
-                    className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-white border border-jf-border rounded-xl text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/30 focus:border-jf-blue"
+                    placeholder={isFr ? 'Votre nom' : 'Last name'}
+                    className={`${inputBaseClass} px-3.5`}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label htmlFor="auth-firstname" className="block text-xs font-semibold text-jf-navy">
+                    {isFr ? 'Prénom' : 'First Name'}
+                  </label>
+                  <input
+                    id="auth-firstname"
+                    type="text"
+                    required
+                    autoComplete="given-name"
+                    value={firstName}
+                    onChange={(e) => {
+                      setFirstName(e.target.value);
+                      resetFormErrors();
+                    }}
+                    placeholder={isFr ? 'Votre prénom' : 'First name'}
+                    className={`${inputBaseClass} px-3.5`}
                   />
                 </div>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label htmlFor="auth-reg-email" className="block text-xs font-semibold text-jf-navy">
                   {isFr ? 'Adresse e-mail' : 'Email Address'}
                 </label>
@@ -576,13 +579,13 @@ export function AuthModal({
                       setEmail(e.target.value);
                       resetFormErrors();
                     }}
-                    placeholder="vous@exemple.com"
-                    className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-white border border-jf-border rounded-xl text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/30 focus:border-jf-blue"
+                    placeholder={isFr ? 'Votre adresse e-mail' : 'Email address'}
+                    className={`${inputBaseClass} pl-10 pr-3.5`}
                   />
                 </div>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label htmlFor="auth-reg-password" className="block text-xs font-semibold text-jf-navy">
                   {isFr ? 'Mot de passe' : 'Password'}
                 </label>
@@ -600,7 +603,7 @@ export function AuthModal({
                       resetFormErrors();
                     }}
                     placeholder={isFr ? 'Minimum 8 caractères' : 'Minimum 8 characters'}
-                    className="w-full pl-10 pr-11 py-2.5 text-sm bg-white border border-jf-border rounded-xl text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/30 focus:border-jf-blue"
+                    className={`${inputBaseClass} pl-10 pr-11`}
                   />
                   <button
                     type="button"
@@ -623,30 +626,32 @@ export function AuthModal({
                           ? 'Afficher le mot de passe'
                           : 'Show password'
                     }
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-slate-500 hover:text-jf-navy hover:bg-jf-ice transition-colors"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-slate-500 hover:text-jf-navy hover:bg-jf-ice transition-colors"
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
                 </div>
 
                 {password.length > 0 && (
-                  <div className="pt-1 space-y-1">
-                    <div className="grid grid-cols-3 gap-1.5">
+                  <div className="pt-1 flex items-center gap-2.5">
+                    <div className="flex-1 grid grid-cols-3 gap-1">
                       {[1, 2, 3].map((step) => (
                         <div
                           key={step}
-                          className={`h-1.5 rounded-full transition-colors ${
+                          className={`h-1 rounded-full transition-colors ${
                             strength.level >= step ? strength.color : 'bg-slate-200'
                           }`}
                         />
                       ))}
                     </div>
-                    <div className="text-[11px] font-medium text-slate-600">{strength.label}</div>
+                    <span className="text-[11px] font-medium text-slate-600 shrink-0">
+                      {strength.label}
+                    </span>
                   </div>
                 )}
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label
                   htmlFor="auth-reg-confirm-password"
                   className="block text-xs font-semibold text-jf-navy"
@@ -666,8 +671,8 @@ export function AuthModal({
                       setConfirmPassword(e.target.value);
                       resetFormErrors();
                     }}
-                    placeholder={isFr ? 'Retapez votre mot de passe' : 'Re-enter your password'}
-                    className="w-full pl-10 pr-11 py-2.5 text-sm bg-white border border-jf-border rounded-xl text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/30 focus:border-jf-blue"
+                    placeholder={isFr ? 'Confirmez votre mot de passe' : 'Confirm your password'}
+                    className={`${inputBaseClass} pl-10 pr-11`}
                   />
                   <button
                     type="button"
@@ -681,7 +686,16 @@ export function AuthModal({
                           ? 'Afficher la confirmation du mot de passe'
                           : 'Show confirm password'
                     }
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-slate-500 hover:text-jf-navy hover:bg-jf-ice transition-colors"
+                    title={
+                      showConfirmPassword
+                        ? isFr
+                          ? 'Masquer le mot de passe'
+                          : 'Hide password'
+                        : isFr
+                          ? 'Afficher le mot de passe'
+                          : 'Show password'
+                    }
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-slate-500 hover:text-jf-navy hover:bg-jf-ice transition-colors"
                   >
                     {showConfirmPassword ? (
                       <EyeOff className="w-4 h-4" />
@@ -700,7 +714,7 @@ export function AuthModal({
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full py-3 px-4 text-sm font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover disabled:opacity-60 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
+                className="w-full py-2.5 px-5 text-sm font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover disabled:opacity-60 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2 mt-1"
               >
                 {loading ? (
                   <>
@@ -708,20 +722,16 @@ export function AuthModal({
                     <span>{isFr ? 'Envoi du code à 5 chiffres…' : 'Sending 5-digit code…'}</span>
                   </>
                 ) : (
-                  <span>
-                    {isFr
-                      ? 'Créer mon compte & recevoir le code'
-                      : 'Create Account & Send 5-Digit Code'}
-                  </span>
+                  <span>{isFr ? 'Créer mon compte' : 'Create Account'}</span>
                 )}
               </button>
             </form>
           )}
 
-          {/* LOGIN FORM */}
+          {/* LOGIN FORM — Dedicated Clean Screen */}
           {mode === 'login' && (
-            <form onSubmit={handleLoginSubmit} className="space-y-4">
-              <div className="space-y-1.5">
+            <form onSubmit={handleLoginSubmit} className="space-y-3.5">
+              <div className="space-y-1">
                 <label htmlFor="auth-login-email" className="block text-xs font-semibold text-jf-navy">
                   {isFr ? 'Adresse e-mail' : 'Email Address'}
                 </label>
@@ -737,13 +747,13 @@ export function AuthModal({
                       setEmail(e.target.value);
                       resetFormErrors();
                     }}
-                    placeholder="vous@exemple.com"
-                    className="w-full pl-10 pr-3.5 py-2.5 text-sm bg-white border border-jf-border rounded-xl text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/30 focus:border-jf-blue"
+                    placeholder={isFr ? 'Votre adresse e-mail' : 'Email address'}
+                    className={`${inputBaseClass} pl-10 pr-3.5`}
                   />
                 </div>
               </div>
 
-              <div className="space-y-1.5">
+              <div className="space-y-1">
                 <label
                   htmlFor="auth-login-password"
                   className="block text-xs font-semibold text-jf-navy"
@@ -762,8 +772,8 @@ export function AuthModal({
                       setPassword(e.target.value);
                       resetFormErrors();
                     }}
-                    placeholder="••••••••"
-                    className="w-full pl-10 pr-11 py-2.5 text-sm bg-white border border-jf-border rounded-xl text-jf-navy placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-jf-blue/30 focus:border-jf-blue"
+                    placeholder={isFr ? 'Votre mot de passe' : 'Your password'}
+                    className={`${inputBaseClass} pl-10 pr-11`}
                   />
                   <button
                     type="button"
@@ -786,7 +796,7 @@ export function AuthModal({
                           ? 'Afficher le mot de passe'
                           : 'Show password'
                     }
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-slate-500 hover:text-jf-navy hover:bg-jf-ice transition-colors"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 rounded-md text-slate-500 hover:text-jf-navy hover:bg-jf-ice transition-colors"
                   >
                     {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                   </button>
@@ -796,7 +806,7 @@ export function AuthModal({
               <button
                 type="submit"
                 disabled={loading}
-                className="w-full py-3 px-4 text-sm font-semibold text-white bg-jf-navy hover:bg-jf-dark disabled:opacity-60 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
+                className="w-full py-2.5 px-5 text-sm font-semibold text-white bg-jf-navy hover:bg-jf-dark disabled:opacity-60 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2 mt-1"
               >
                 {loading ? (
                   <>
@@ -812,8 +822,8 @@ export function AuthModal({
 
           {/* 5-DIGIT CODE VERIFICATION FORM */}
           {mode === 'verify' && (
-            <form onSubmit={handleVerifySubmit} className="space-y-5">
-              <div className="flex items-center justify-center gap-2.5 sm:gap-3">
+            <form onSubmit={handleVerifySubmit} className="space-y-4">
+              <div className="flex items-center justify-center gap-2.5">
                 {digits.map((digit, idx) => (
                   <input
                     key={idx}
@@ -829,7 +839,7 @@ export function AuthModal({
                     onChange={(e) => handleDigitChange(idx, e.target.value)}
                     onKeyDown={(e) => handleDigitKeyDown(idx, e)}
                     onPaste={handleDigitPaste}
-                    className="w-12 h-14 sm:w-14 sm:h-16 text-center font-mono text-2xl font-bold text-jf-navy bg-jf-ice/60 border-2 border-jf-border rounded-xl focus:outline-none focus:border-jf-blue focus:bg-white focus:ring-2 focus:ring-jf-blue/25 transition-all"
+                    className="w-12 h-14 sm:w-14 sm:h-15 text-center font-mono tabular-nums text-2xl font-bold text-jf-navy bg-jf-ice/60 border-2 border-jf-border rounded-xl focus:outline-none focus:border-jf-blue focus:bg-white focus:ring-2 focus:ring-jf-blue/25 transition-colors"
                   />
                 ))}
               </div>
@@ -837,7 +847,7 @@ export function AuthModal({
               <button
                 type="submit"
                 disabled={loading || codeValue.length !== 5}
-                className="w-full py-3 px-4 text-sm font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover disabled:opacity-50 rounded-xl shadow-sm transition-all flex items-center justify-center gap-2"
+                className="w-full py-2.5 px-5 text-sm font-semibold text-white bg-jf-blue hover:bg-jf-blue-hover disabled:opacity-50 rounded-lg shadow-xs transition-colors flex items-center justify-center gap-2"
               >
                 {loading ? (
                   <>
@@ -852,7 +862,7 @@ export function AuthModal({
                 )}
               </button>
 
-              <div className="flex flex-col sm:flex-row items-center justify-between gap-2 pt-1 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 text-xs">
                 <button
                   type="button"
                   disabled={cooldown > 0 || resendLoading}
@@ -860,23 +870,20 @@ export function AuthModal({
                   className="font-semibold text-jf-blue hover:text-jf-navy disabled:text-slate-400 transition-colors inline-flex items-center gap-1.5"
                 >
                   <RefreshCw className={`w-3.5 h-3.5 ${resendLoading ? 'animate-spin' : ''}`} />
-                  <span>
+                  <span className="tabular-nums">
                     {cooldown > 0
                       ? isFr
                         ? `Renvoyer le code (${cooldown}s)`
                         : `Resend code (${cooldown}s)`
                       : isFr
-                        ? 'Renvoyer un nouveau code à 5 chiffres'
+                        ? 'Renvoyer un nouveau code'
                         : 'Resend 5-digit code'}
                   </span>
                 </button>
 
                 <button
                   type="button"
-                  onClick={() => {
-                    setMode('register');
-                    resetFormErrors();
-                  }}
+                  onClick={() => switchMode('register')}
                   className="text-slate-500 hover:text-jf-navy inline-flex items-center gap-1"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
@@ -886,12 +893,12 @@ export function AuthModal({
             </form>
           )}
 
-          {/* Optional Google OAuth Sign-In Divider (Step 1 only) */}
+          {/* Secondary Google OAuth Action (Step 1 Only) */}
           {mode !== 'verify' && (
             <>
-              <div className="relative flex items-center py-1">
+              <div className="relative flex items-center">
                 <div className="flex-grow border-t border-jf-border" />
-                <span className="shrink-0 px-3 text-[11px] font-medium text-slate-400 uppercase tracking-wider">
+                <span className="shrink-0 px-3 text-xs text-slate-400">
                   {isFr ? 'ou' : 'or'}
                 </span>
                 <div className="flex-grow border-t border-jf-border" />
@@ -901,9 +908,9 @@ export function AuthModal({
                 type="button"
                 disabled={googleLoading}
                 onClick={handleGoogleClick}
-                className="w-full py-2.5 px-4 text-sm font-semibold text-jf-navy bg-white hover:bg-jf-ice border border-jf-border-strong rounded-xl transition-colors flex items-center justify-center gap-2.5 disabled:opacity-60"
+                className="w-full py-2.5 px-4 text-sm font-semibold text-jf-navy bg-white hover:bg-jf-ice border border-jf-border-strong rounded-lg transition-colors flex items-center justify-center gap-2.5 disabled:opacity-60"
               >
-                <svg className="w-4 h-4" viewBox="0 0 24 24" aria-hidden="true">
+                <svg className="w-4 h-4 shrink-0" viewBox="0 0 24 24" aria-hidden="true">
                   <path
                     fill="#4285F4"
                     d="M23.49 12.27c0-.79-.07-1.55-.2-2.27H12v4.3h6.44a5.5 5.5 0 0 1-2.39 3.61v3h3.87c2.26-2.08 3.57-5.15 3.57-8.64z"
@@ -934,6 +941,35 @@ export function AuthModal({
             </>
           )}
         </div>
+
+        {/* Clean Dedicated Bottom Footer Link — Replaces Top Tabs */}
+        {mode !== 'verify' && (
+          <div className="px-6 py-3.5 bg-jf-ice/60 border-t border-jf-border text-center text-xs sm:text-[13px] text-slate-600 shrink-0">
+            {mode === 'register' ? (
+              <p>
+                {isFr ? 'Si vous avez un compte, ' : 'Already have an account? '}
+                <button
+                  type="button"
+                  onClick={() => switchMode('login')}
+                  className="font-semibold text-jf-blue hover:text-jf-navy underline-offset-4 hover:underline transition-colors"
+                >
+                  {isFr ? 'connectez-vous' : 'Sign in'}
+                </button>
+              </p>
+            ) : (
+              <p>
+                {isFr ? 'Si vous n’avez pas de compte, ' : 'Don’t have an account? '}
+                <button
+                  type="button"
+                  onClick={() => switchMode('register')}
+                  className="font-semibold text-jf-blue hover:text-jf-navy underline-offset-4 hover:underline transition-colors"
+                >
+                  {isFr ? 'créez un compte' : 'Create an account'}
+                </button>
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
