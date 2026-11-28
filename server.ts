@@ -13,18 +13,23 @@ import {
   createRateLimiter,
   extractDomainFromUrl,
   isSafePublicHttpUrl,
+  registerAdminEmailChecker,
   registerAppTokenVerifier,
+  registerUserModerationChecker,
   requireFirebaseAuth,
   sanitizeHttpUrl,
 } from './serverSecurity.ts';
 import { createAuthRouter, verifyAppSessionToken } from './serverAuthEngine.ts';
+import { detectScamRedFlags } from './serverApplicationEngine.ts';
 import { fetchAggregatedLiveJobFeeds } from './serverJobFeeds.ts';
 import {
   closeEngineDb,
   enqueueBackgroundJob,
+  getAccountModerationStatus,
   getDailyAiUsageSummary,
   getEngineDb,
   getEngineStorageInfo,
+  isEmailInAdminRoles,
   isSourceEnabled,
   listCompanies,
   listEngineDbBackups,
@@ -283,8 +288,10 @@ async function startServer() {
 
   startBackgroundWorkerLoop();
 
-  // Register JOBFOUNDS email/password session token verifier & mount /api/auth/* endpoints
+  // Register JOBFOUNDS email/password session token verifier, dynamic admin checker, universal moderation checker & mount /api/auth/* + /api/admin/* endpoints
   registerAppTokenVerifier(verifyAppSessionToken);
+  registerAdminEmailChecker(isEmailInAdminRoles);
+  registerUserModerationChecker(getAccountModerationStatus);
   app.use('/api', createAuthRouter());
 
   // Mount Global Company Intelligence, Career Monitor, HR Verification, Matching, Notifications & Admin routes
@@ -547,7 +554,11 @@ STRICT RULES:
       const validJobs = (Array.isArray(parsed.jobs) ? parsed.jobs : []).filter((j: any) => {
         const cleanUrl = sanitizeHttpUrl(j?.sourceUrl);
         if (!cleanUrl || !j?.title || !j?.company) return false;
-        if (String(j.verificationStatus || '').toLowerCase() === 'expired') return false;
+        const verifLower = String(j.verificationStatus || '').toLowerCase();
+        if (verifLower === 'expired' || verifLower === 'suspicious') return false;
+        if (detectScamRedFlags(`${j.title} ${j.description || ''} ${j.salaryRange || ''}`).length > 0) {
+          return false;
+        }
         if (j.applicationDeadline) {
           const dl = Date.parse(String(j.applicationDeadline));
           if (!Number.isNaN(dl) && dl < Date.now() - 86_400_000) return false;

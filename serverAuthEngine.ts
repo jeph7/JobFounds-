@@ -2,33 +2,57 @@ import crypto from 'crypto';
 import express from 'express';
 import {
   type AuthUserRecord,
+  type UserModerationStatus,
   type VerificationCodePurpose,
   consumeVerificationCode,
   createAuthUserRecord,
   createEmailVerificationCodeRecord,
   deleteAuthUserByUid,
   deleteUserWorkspaceData,
+  getAccountModerationStatus,
   getAuthUserByEmail,
   getAuthUserByUid,
   getLatestActiveVerificationCode,
   getLatestVerificationCodeAny,
+  getPlatformUserDossierForAdmin,
   getUserWorkspaceData,
+  grantAdminRoleByEmail,
   incrementVerificationCodeAttempts,
+  isEmailInAdminRoles,
+  listAdminRoleRecords,
+  listAllPlatformUsersForAdmin,
+  listAllSubmissionsForAdmin,
   markAuthUserEmailVerified,
+  moderateAccountDirectoryAdmin,
+  moderateAuthUserAdmin,
+  moderateSubmissionAdmin,
   recordSourceCall,
+  revokeAdminRoleByEmail,
   updateAuthUserPassword,
+  upsertAccountDirectoryEntry,
   upsertUserWorkspaceData,
+  writeAuditLog,
 } from './serverEngineDb.ts';
 import { getResendFromEmail } from './serverApplicationEngine.ts';
 import {
   type AuthedRequest,
+  BOOTSTRAP_ADMIN_EMAIL,
   SESSION_COOKIE_NAME,
   type VerifiedAuthUser,
+  checkAccountModeration,
   clampStr,
   createRateLimiter,
+  extractClientIp,
   isAdminAuthUser,
+  registerAdminEmailChecker,
+  registerUserModerationChecker,
+  requireAdminAuth,
   requireFirebaseAuth,
 } from './serverSecurity.ts';
+
+// Ensure dynamic SQLite admin_roles and account moderation lookups are always active
+registerAdminEmailChecker(isEmailInAdminRoles);
+registerUserModerationChecker(getAccountModerationStatus);
 
 // Session signing key from environment or ephemeral in-memory 256-bit key (never hardcoded)
 const SESSION_SECRET =
@@ -48,6 +72,7 @@ export interface PublicAuthUser {
   emailVerified: boolean;
   accountRole: 'candidate' | 'recruiter';
   isAdmin: boolean;
+  moderationStatus: UserModerationStatus;
   provider: 'password';
 }
 
@@ -63,6 +88,7 @@ function toPublicUser(user: AuthUserRecord): PublicAuthUser {
       email: user.email,
       emailVerified: user.emailVerified,
     }),
+    moderationStatus: user.moderationStatus,
     provider: 'password',
   };
 }
@@ -200,9 +226,12 @@ export function verifyAppSessionToken(token: string): VerifiedAuthUser | null {
     const nowSec = Math.floor(Date.now() / 1000);
     if (!payload.sub || !payload.exp || payload.exp <= nowSec) return null;
 
-    // Always read authoritative verification state from SQLite
+    // Always read authoritative verification & moderation state from SQLite
     const dbUser = getAuthUserByUid(payload.sub);
     if (!dbUser) return null;
+    if (dbUser.moderationStatus === 'rejected' || dbUser.moderationStatus === 'suspended') {
+      return null;
+    }
 
     return {
       uid: dbUser.uid,
@@ -696,6 +725,19 @@ export function createAuthRouter(): express.Router {
         return;
       }
 
+      if (user.moderationStatus === 'rejected' || user.moderationStatus === 'suspended') {
+        clearSessionCookie(req, res);
+        res.status(403).json({
+          code: 'ACCOUNT_MODERATED',
+          moderationStatus: user.moderationStatus,
+          error:
+            user.moderationStatus === 'suspended'
+              ? `Ce compte a été suspendu par un administrateur.${user.moderationNote ? ` Motif : ${user.moderationNote}` : ''}`
+              : `Ce compte a été refusé par un administrateur.${user.moderationNote ? ` Motif : ${user.moderationNote}` : ''}`,
+        });
+        return;
+      }
+
       const token = issueAppSessionToken(user);
       setSessionCookie(req, res, token);
 
@@ -966,6 +1008,23 @@ export function createAuthRouter(): express.Router {
       res.status(401).json({ authenticated: false, code: 'AUTH_REQUIRED' });
       return;
     }
+
+    const mod = checkAccountModeration(req.authUser);
+    if (mod.blocked) {
+      clearSessionCookie(req, res);
+      res.status(403).json({
+        authenticated: false,
+        code: 'ACCOUNT_MODERATED',
+        moderationStatus: mod.moderationStatus,
+        moderationNote: mod.moderationNote,
+        error:
+          mod.moderationStatus === 'suspended'
+            ? `Votre compte a été suspendu par un administrateur.${mod.moderationNote ? ` Motif : ${mod.moderationNote}` : ''}`
+            : `Votre compte a été refusé par un administrateur.${mod.moderationNote ? ` Motif : ${mod.moderationNote}` : ''}`,
+      });
+      return;
+    }
+
     const dbUser = getAuthUserByUid(req.authUser.uid);
     if (dbUser) {
       const freshToken = issueAppSessionToken(dbUser);
@@ -976,6 +1035,16 @@ export function createAuthRouter(): express.Router {
       });
       return;
     }
+
+    // Auto-index verified Firebase/Google accounts into SQLite directory so ALL Admins (Password & Google) see them
+    if (req.authUser.email) {
+      upsertAccountDirectoryEntry({
+        uid: req.authUser.uid,
+        email: req.authUser.email,
+        provider: 'firebase',
+      });
+    }
+
     res.json({
       authenticated: true,
       user: {
@@ -985,10 +1054,73 @@ export function createAuthRouter(): express.Router {
         emailVerified: req.authUser.emailVerified,
         accountRole: 'candidate',
         isAdmin: isAdminAuthUser(req.authUser),
+        moderationStatus: mod.moderationStatus,
         provider: 'firebase',
       },
     });
   });
+
+  // 8b. POST /api/account/sync-directory — Mirror verified Google/Firebase user's non-sensitive profile & counts into SQLite for unified Admin visibility
+  router.post(
+    '/account/sync-directory',
+    workspaceLimiter,
+    requireFirebaseAuth,
+    (req: AuthedRequest, res) => {
+      try {
+        const uid = req.authUser!.uid;
+        const email = req.authUser!.email;
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        upsertAccountDirectoryEntry({
+          uid,
+          email,
+          fullName: typeof body.fullName === 'string' ? body.fullName : undefined,
+          provider: getAuthUserByUid(uid) ? 'password' : 'firebase',
+          accountRole:
+            body.accountRole === 'recruiter' || body.accountRole === 'candidate'
+              ? body.accountRole
+              : undefined,
+          lang: typeof body.lang === 'string' ? body.lang : undefined,
+          discoverable: typeof body.discoverable === 'boolean' ? body.discoverable : undefined,
+          gdprConsent: typeof body.gdprConsent === 'boolean' ? body.gdprConsent : undefined,
+          companyName: typeof body.companyName === 'string' ? body.companyName : undefined,
+          companyWebsite: typeof body.companyWebsite === 'string' ? body.companyWebsite : undefined,
+          profile: body.profile && typeof body.profile === 'object' ? body.profile : undefined,
+          cvsCount: Array.isArray(body.cvs)
+            ? body.cvs.length
+            : typeof body.cvsCount === 'number'
+              ? body.cvsCount
+              : undefined,
+          trackedAppsCount: Array.isArray(body.applications)
+            ? body.applications.length
+            : typeof body.trackedAppsCount === 'number'
+              ? body.trackedAppsCount
+              : undefined,
+        });
+        // Also mirror workspace CVs/applications if provided so Admin "Voir infos" shows full dossier even when signed in via Email/Password
+        if (body.profile !== undefined || Array.isArray(body.cvs) || Array.isArray(body.applications)) {
+          upsertUserWorkspaceData(uid, {
+            profile: body.profile !== undefined ? body.profile : undefined,
+            cvs: Array.isArray(body.cvs) ? body.cvs : undefined,
+            applications: Array.isArray(body.applications) ? body.applications : undefined,
+            accountRole:
+              body.accountRole === 'recruiter' || body.accountRole === 'candidate'
+                ? body.accountRole
+                : undefined,
+            lang: typeof body.lang === 'string' ? body.lang : undefined,
+            discoverable: typeof body.discoverable === 'boolean' ? body.discoverable : undefined,
+            gdprConsent: typeof body.gdprConsent === 'boolean' ? body.gdprConsent : undefined,
+            companyName: typeof body.companyName === 'string' ? body.companyName : undefined,
+            companyWebsite: typeof body.companyWebsite === 'string' ? body.companyWebsite : undefined,
+          });
+        }
+        res.json({ synced: true });
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'Erreur lors de la synchronisation du profil.',
+        });
+      }
+    }
+  );
 
   // 9. GET /api/account/workspace — Load server-persisted profile, CVs, CRM & watchlist (verified users only)
   router.get('/account/workspace', workspaceLimiter, requireFirebaseAuth, (req: AuthedRequest, res) => {
@@ -1035,6 +1167,355 @@ export function createAuthRouter(): express.Router {
     }
     res.json({ deleted: true });
   });
+
+  // =========================================================================
+  // ADMIN ONLY: USER DIRECTORY, DOSSIERS, ADMIN ROLE PROMOTION & MODERATION
+  // =========================================================================
+  const adminLimiter = createRateLimiter({
+    windowMs: 15 * 60_000,
+    maxAuthenticated: 200,
+    maxGuest: 10,
+    bucketPrefix: 'admin_users',
+  });
+
+  // 12. GET /api/admin/users — List all platform users + admin role grants
+  router.get('/admin/users', adminLimiter, requireAdminAuth, (req: AuthedRequest, res) => {
+    try {
+      const search = clampStr(req.query?.search, 120);
+      const limit = Math.min(500, Math.max(1, Number(req.query?.limit) || 200));
+      const users = listAllPlatformUsersForAdmin(search, limit);
+      const admins = listAdminRoleRecords();
+      res.json({ users, admins });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Impossible de charger les utilisateurs.',
+      });
+    }
+  });
+
+  // 13. GET /api/admin/users/:uid — Full user dossier (profile, CVs, CRM, submissions, notifications)
+  router.get('/admin/users/:uid', adminLimiter, requireAdminAuth, (req: AuthedRequest, res) => {
+    try {
+      const targetUid = clampStr(req.params.uid, 128);
+      if (!targetUid) {
+        res.status(400).json({ error: 'Identifiant utilisateur requis.' });
+        return;
+      }
+      const dossier = getPlatformUserDossierForAdmin(targetUid);
+      if (!dossier) {
+        res.status(404).json({ error: 'Dossier utilisateur introuvable.' });
+        return;
+      }
+      res.json({ dossier });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Impossible de charger le dossier utilisateur.',
+      });
+    }
+  });
+
+  // 14. POST /api/admin/users/:uid/moderate — Approve / Reject / Suspend / Verify / Role / Admin (covers BOTH Password AND Google accounts)
+  router.post(
+    '/admin/users/:uid/moderate',
+    adminLimiter,
+    requireAdminAuth,
+    (req: AuthedRequest, res) => {
+      try {
+        const targetUid = clampStr(req.params.uid, 128);
+        const body = req.body && typeof req.body === 'object' ? req.body : {};
+        const bodyEmail = clampStr(body.email, 200).toLowerCase();
+
+        const existingAuth =
+          getAuthUserByUid(targetUid) || (bodyEmail ? getAuthUserByEmail(bodyEmail) : null);
+
+        const actorEmail = req.authUser!.email.toLowerCase();
+        const targetEmail = (existingAuth?.email || bodyEmail).toLowerCase();
+
+        const moderationStatus =
+          body.moderationStatus === 'approved' ||
+          body.moderationStatus === 'pending' ||
+          body.moderationStatus === 'rejected' ||
+          body.moderationStatus === 'suspended'
+            ? (body.moderationStatus as UserModerationStatus)
+            : undefined;
+        const moderationNote =
+          typeof body.moderationNote === 'string' ? clampStr(body.moderationNote, 400) : undefined;
+        const emailVerified =
+          typeof body.emailVerified === 'boolean' ? body.emailVerified : undefined;
+        const accountRole =
+          body.accountRole === 'candidate' || body.accountRole === 'recruiter'
+            ? body.accountRole
+            : undefined;
+        const isAdminFlag = typeof body.isAdmin === 'boolean' ? body.isAdmin : undefined;
+
+        if (targetEmail === BOOTSTRAP_ADMIN_EMAIL) {
+          if (moderationStatus === 'rejected' || moderationStatus === 'suspended') {
+            res.status(400).json({
+              error: 'Impossible de refuser ou suspendre le compte propriétaire principal.',
+            });
+            return;
+          }
+          if (isAdminFlag === false) {
+            res.status(400).json({
+              error: 'Impossible de retirer les droits administrateur du compte propriétaire principal.',
+            });
+            return;
+          }
+        }
+
+        if (targetEmail && targetEmail === actorEmail) {
+          if (moderationStatus === 'rejected' || moderationStatus === 'suspended') {
+            res.status(400).json({ error: 'Vous ne pouvez pas suspendre votre propre compte.' });
+            return;
+          }
+          if (isAdminFlag === false) {
+            res.status(400).json({
+              error: 'Vous ne pouvez pas retirer vos propres droits administrateur.',
+            });
+            return;
+          }
+        }
+
+        if (existingAuth) {
+          const updated = moderateAuthUserAdmin(existingAuth.uid, {
+            moderationStatus,
+            moderationNote,
+            emailVerified,
+            accountRole,
+            isAdmin: isAdminFlag,
+            moderatedBy: actorEmail,
+          });
+          if (!updated) {
+            res.status(500).json({ error: 'Échec de la mise à jour du compte.' });
+            return;
+          }
+          // Mirror moderation status into account_directory too if email matches a dual account
+          moderateAccountDirectoryAdmin({
+            uid: updated.uid,
+            email: updated.email,
+            moderationStatus: updated.moderationStatus,
+            moderationNote: updated.moderationNote,
+            accountRole: updated.accountRole,
+            isAdmin: isAdminFlag,
+            moderatedBy: actorEmail,
+          });
+
+          writeAuditLog({
+            actorUid: req.authUser!.uid,
+            actorEmail,
+            actorRole: 'admin',
+            action: 'admin_moderate_user',
+            targetType: 'auth_user',
+            targetId: updated.uid,
+            details: {
+              targetEmail: updated.email,
+              moderationStatus: updated.moderationStatus,
+              emailVerified: updated.emailVerified,
+              accountRole: updated.accountRole,
+              isAdmin: updated.isAdmin,
+              note: updated.moderationNote,
+            },
+            ipAddress: extractClientIp(req),
+          });
+
+          res.json({ user: toPublicUser(updated) });
+          return;
+        }
+
+        // Google / Firebase account moderation in SQLite account_directory (enforced immediately on server APIs!)
+        const updatedDir = moderateAccountDirectoryAdmin({
+          uid: targetUid,
+          email: targetEmail,
+          moderationStatus,
+          moderationNote,
+          accountRole,
+          isAdmin: isAdminFlag,
+          moderatedBy: actorEmail,
+        });
+
+        if (!updatedDir) {
+          res.status(404).json({ error: 'Compte utilisateur introuvable.' });
+          return;
+        }
+
+        writeAuditLog({
+          actorUid: req.authUser!.uid,
+          actorEmail,
+          actorRole: 'admin',
+          action: 'admin_moderate_google_user',
+          targetType: 'account_directory',
+          targetId: updatedDir.uid || updatedDir.email,
+          details: {
+            targetEmail: updatedDir.email,
+            moderationStatus: updatedDir.moderationStatus,
+            accountRole: updatedDir.accountRole,
+            isAdmin: updatedDir.isAdmin,
+            note: updatedDir.moderationNote,
+          },
+          ipAddress: extractClientIp(req),
+        });
+
+        res.json({
+          user: {
+            uid: updatedDir.uid,
+            email: updatedDir.email,
+            fullName: updatedDir.fullName,
+            emailVerified: true,
+            accountRole: updatedDir.accountRole,
+            isAdmin: updatedDir.isAdmin,
+            moderationStatus: updatedDir.moderationStatus,
+            provider: 'firebase',
+          },
+        });
+      } catch (err) {
+        res.status(500).json({
+          error: err instanceof Error ? err.message : 'Erreur lors de la modération du compte.',
+        });
+      }
+    }
+  );
+
+  // 15. POST /api/admin/admins/grant — Promote any email address (Password or Google) to Admin
+  router.post('/admin/admins/grant', adminLimiter, requireAdminAuth, (req: AuthedRequest, res) => {
+    try {
+      const email = clampStr(req.body?.email, 200).toLowerCase();
+      const note = clampStr(req.body?.note, 300);
+      if (!EMAIL_REGEX.test(email)) {
+        res.status(400).json({ error: 'Veuillez saisir une adresse e-mail valide.' });
+        return;
+      }
+
+      const actorEmail = req.authUser!.email.toLowerCase();
+      const grant = grantAdminRoleByEmail(email, actorEmail, note || 'Nommé administrateur');
+
+      writeAuditLog({
+        actorUid: req.authUser!.uid,
+        actorEmail,
+        actorRole: 'admin',
+        action: 'admin_grant_role',
+        targetType: 'admin_role',
+        targetId: email,
+        details: { email, note: grant.note },
+        ipAddress: extractClientIp(req),
+      });
+
+      res.status(201).json({
+        grant,
+        admins: listAdminRoleRecords(),
+        message: `${email} dispose désormais des droits administrateur.`,
+      });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : 'Impossible d’accorder le rôle administrateur.',
+      });
+    }
+  });
+
+  // 16. POST /api/admin/admins/revoke — Revoke Admin privileges from a non-owner email
+  router.post('/admin/admins/revoke', adminLimiter, requireAdminAuth, (req: AuthedRequest, res) => {
+    try {
+      const email = clampStr(req.body?.email, 200).toLowerCase();
+      if (!EMAIL_REGEX.test(email)) {
+        res.status(400).json({ error: 'Adresse e-mail invalide.' });
+        return;
+      }
+      const actorEmail = req.authUser!.email.toLowerCase();
+      if (email === actorEmail) {
+        res.status(400).json({
+          error: 'Vous ne pouvez pas révoquer vos propres droits administrateur.',
+        });
+        return;
+      }
+
+      const result = revokeAdminRoleByEmail(email);
+      if (!result.ok) {
+        res.status(400).json({ error: result.reason || 'Révocation refusée.' });
+        return;
+      }
+
+      writeAuditLog({
+        actorUid: req.authUser!.uid,
+        actorEmail,
+        actorRole: 'admin',
+        action: 'admin_revoke_role',
+        targetType: 'admin_role',
+        targetId: email,
+        details: { email },
+        ipAddress: extractClientIp(req),
+      });
+
+      res.json({
+        revoked: true,
+        admins: listAdminRoleRecords(),
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Erreur lors de la révocation.',
+      });
+    }
+  });
+
+  // 17. GET /api/admin/applications — List all platform application submissions for admin review
+  router.get('/admin/applications', adminLimiter, requireAdminAuth, (req: AuthedRequest, res) => {
+    try {
+      const limit = Math.min(300, Math.max(1, Number(req.query?.limit) || 120));
+      const submissions = listAllSubmissionsForAdmin(limit);
+      res.json({ submissions });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Impossible de charger les candidatures.',
+      });
+    }
+  });
+
+  // 18. POST /api/admin/applications/:submissionId/moderate — Approve or Reject a submission
+  router.post(
+    '/admin/applications/:submissionId/moderate',
+    adminLimiter,
+    requireAdminAuth,
+    (req: AuthedRequest, res) => {
+      try {
+        const submissionId = clampStr(req.params.submissionId, 128);
+        const rawStatus = String(req.body?.status || '').trim();
+        if (rawStatus !== 'approved' && rawStatus !== 'rejected' && rawStatus !== 'pending') {
+          res.status(400).json({
+            error: 'Statut de modération invalide (attendu : approved, rejected ou pending).',
+          });
+          return;
+        }
+        const note = clampStr(req.body?.note, 400);
+        const actorEmail = req.authUser!.email.toLowerCase();
+
+        const updated = moderateSubmissionAdmin(submissionId, {
+          status: rawStatus,
+          note,
+          moderatedBy: actorEmail,
+        });
+        if (!updated) {
+          res.status(404).json({ error: 'Candidature introuvable.' });
+          return;
+        }
+
+        writeAuditLog({
+          actorUid: req.authUser!.uid,
+          actorEmail,
+          actorRole: 'admin',
+          action: 'admin_moderate_submission',
+          targetType: 'application_submission',
+          targetId: submissionId,
+          details: { status: rawStatus, note },
+          ipAddress: extractClientIp(req),
+        });
+
+        res.json({ submission: updated });
+      } catch (err) {
+        res.status(500).json({
+          error:
+            err instanceof Error ? err.message : 'Erreur lors de la modération de la candidature.',
+        });
+      }
+    }
+  );
 
   return router;
 }

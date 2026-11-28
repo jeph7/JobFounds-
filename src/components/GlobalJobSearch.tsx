@@ -153,24 +153,32 @@ const CLIENT_COUNTRY_ALIASES: Array<{ region: ClientRegionId; aliases: string[] 
   { region: 'caribbean', aliases: ['haiti', 'ayiti', 'port-au-prince', 'cap-haitien'] },
   { region: 'caribbean', aliases: ['dominican republic', 'republique dominicaine', 'santo domingo'] },
   { region: 'caribbean', aliases: ['jamaica', 'jamaique', 'kingston'] },
+  { region: 'caribbean', aliases: ['trinidad', 'trinidad and tobago', 'barbados', 'barbade', 'bahamas', 'puerto rico', 'porto rico', 'guadeloupe', 'martinique', 'cuba'] },
   { region: 'latin_america', aliases: ['brazil', 'bresil', 'brasil', 'sao paulo', 'rio de janeiro'] },
   { region: 'latin_america', aliases: ['mexico', 'mexique', 'mexico city'] },
   { region: 'latin_america', aliases: ['colombia', 'colombie', 'bogota', 'medellin'] },
   { region: 'latin_america', aliases: ['argentina', 'argentine', 'buenos aires'] },
   { region: 'latin_america', aliases: ['chile', 'chili', 'santiago'] },
   { region: 'latin_america', aliases: ['peru', 'perou', 'lima'] },
+  { region: 'latin_america', aliases: ['uruguay', 'costa rica', 'panama', 'ecuador', 'equateur', 'guatemala', 'paraguay', 'bolivia', 'bolivie'] },
   { region: 'africa', aliases: ['senegal', 'dakar'] },
   { region: 'africa', aliases: ['morocco', 'maroc', 'casablanca', 'rabat'] },
+  { region: 'africa', aliases: ['tunisia', 'tunisie', 'tunis'] },
+  { region: 'africa', aliases: ['algeria', 'algerie', 'algiers', 'alger'] },
   { region: 'africa', aliases: ['ivory coast', 'cote d ivoire', 'cote divoire', 'abidjan'] },
   { region: 'africa', aliases: ['south africa', 'afrique du sud', 'cape town', 'johannesburg'] },
   { region: 'africa', aliases: ['nigeria', 'lagos', 'abuja'] },
   { region: 'africa', aliases: ['kenya', 'nairobi'] },
+  { region: 'africa', aliases: ['egypt', 'egypte', 'cairo', 'le caire'] },
+  { region: 'africa', aliases: ['ghana', 'accra', 'cameroon', 'cameroun', 'rwanda', 'kigali', 'benin', 'togo', 'mauritius', 'madagascar', 'ethiopia'] },
   { region: 'asia', aliases: ['japan', 'japon', 'tokyo', 'osaka'] },
   { region: 'asia', aliases: ['singapore', 'singapour'] },
-  { region: 'asia', aliases: ['india', 'inde', 'bengaluru', 'bangalore', 'mumbai'] },
+  { region: 'asia', aliases: ['india', 'inde', 'bengaluru', 'bangalore', 'mumbai', 'delhi'] },
   { region: 'asia', aliases: ['south korea', 'coree du sud', 'seoul'] },
-  { region: 'oceania', aliases: ['australia', 'australie', 'sydney', 'melbourne', 'brisbane'] },
-  { region: 'oceania', aliases: ['new zealand', 'nouvelle-zelande', 'auckland', 'wellington'] },
+  { region: 'asia', aliases: ['vietnam', 'philippines', 'manila', 'indonesia', 'indonesie', 'jakarta', 'malaysia', 'malaisie', 'thailand', 'thailande'] },
+  { region: 'asia', aliases: ['uae', 'united arab emirates', 'emirats arabes unis', 'dubai', 'abu dhabi', 'qatar', 'saudi arabia', 'arabie saoudite', 'taiwan', 'hong kong'] },
+  { region: 'oceania', aliases: ['australia', 'australie', 'sydney', 'melbourne', 'brisbane', 'perth'] },
+  { region: 'oceania', aliases: ['new zealand', 'nouvelle-zelande', 'auckland', 'wellington', 'fiji'] },
 ];
 
 function normGeo(v: string): string {
@@ -1235,45 +1243,68 @@ export function GlobalJobSearch({
                       </p>
                     </div>
 
-                    {/* Explainable Compatibility Preview */}
-                    <div className="pt-4 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="text-xs font-semibold text-slate-700">
-                          {lang === 'fr'
-                            ? 'Compatibilité indicative avec votre profil'
-                            : 'Indicative Profile Compatibility'}
+                    {/* Explainable 9-Criteria Compatibility Preview */}
+                    <div className="pt-4 border-t border-slate-100 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="space-y-1">
+                          <div className="text-xs font-semibold text-slate-700">
+                            {lang === 'fr'
+                              ? 'Compatibilité indicative sur 9 critères officiels'
+                              : 'Indicative 9-Criteria Profile Compatibility'}
+                          </div>
+                          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">
+                            <span className="font-mono font-semibold tabular-nums text-blue-700">
+                              {baseline.score} / 100
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span>
+                              {lang === 'fr' ? 'Compétences' : 'Skills'}:{' '}
+                              <span className="font-mono tabular-nums">{baseline.skillsRatio}</span>
+                            </span>
+                            <span aria-hidden="true">·</span>
+                            <span>
+                              {baseline.locationAligned
+                                ? lang === 'fr'
+                                  ? 'Zone géographique alignée'
+                                  : 'Location aligned'
+                                : lang === 'fr'
+                                  ? 'Mobilité internationale requise'
+                                  : 'Relocation required'}
+                            </span>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-600">
-                          <span className="font-mono font-semibold tabular-nums text-blue-700">
-                            {baseline.score} / 100
-                          </span>
-                          <span aria-hidden="true">·</span>
+                        <button
+                          type="button"
+                          onClick={() => onOpenMatchForJob(selectedJob)}
+                          className="text-xs font-semibold text-blue-700 hover:underline inline-flex items-center gap-1 whitespace-nowrap shrink-0"
+                        >
+                          <SlidersHorizontal className="w-3.5 h-3.5" />
                           <span>
-                            {lang === 'fr' ? 'Compétences' : 'Skills'}:{' '}
-                            <span className="font-mono tabular-nums">{baseline.skillsRatio}</span>
+                            {lang === 'fr' ? 'Audit IA 9 critères' : '9-Criteria AI Audit'}
                           </span>
-                          <span aria-hidden="true">·</span>
-                          <span>
-                            {baseline.locationAligned
-                              ? lang === 'fr'
-                                ? 'Zone géographique alignée'
-                                : 'Location aligned'
-                              : lang === 'fr'
-                                ? 'Mobilité internationale requise'
-                                : 'Relocation required'}
-                          </span>
-                        </div>
+                        </button>
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => onOpenMatchForJob(selectedJob)}
-                        className="text-xs font-semibold text-blue-700 hover:underline inline-flex items-center gap-1 whitespace-nowrap shrink-0"
-                      >
-                        <SlidersHorizontal className="w-3.5 h-3.5" />
-                        <span>
-                          {lang === 'fr' ? 'Analyse 9 critères IA' : '9-Dimension AI Match'}
-                        </span>
-                      </button>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5 text-[11px] font-mono tabular-nums">
+                        {[
+                          [lang === 'fr' ? '1. Compétences' : '1. Skills', baseline.breakdown.skills],
+                          [lang === 'fr' ? '2. Expérience' : '2. Experience', baseline.breakdown.experience],
+                          [lang === 'fr' ? '3. Formation' : '3. Education', baseline.breakdown.education],
+                          [lang === 'fr' ? '4. Langues' : '4. Languages', baseline.breakdown.languages],
+                          [lang === 'fr' ? '5. Localisation' : '5. Location', baseline.breakdown.locationAndMobility],
+                          [lang === 'fr' ? '6. Autorisation / Visa' : '6. Work Auth', baseline.breakdown.workAuthorization],
+                          [lang === 'fr' ? '7. Disponibilité' : '7. Availability', baseline.breakdown.availability],
+                          [lang === 'fr' ? '8. Salaire' : '8. Salary', baseline.breakdown.salary],
+                          [lang === 'fr' ? '9. Fiabilité source' : '9. Source Rel.', baseline.breakdown.sourceReliability],
+                        ].map(([lbl, val]) => (
+                          <div
+                            key={String(lbl)}
+                            className="px-2 py-1 rounded bg-jf-ice border border-jf-border flex items-center justify-between gap-1"
+                          >
+                            <span className="font-sans text-slate-600 truncate">{lbl}</span>
+                            <span className="font-semibold text-jf-navy">{val}%</span>
+                          </div>
+                        ))}
+                      </div>
                     </div>
                   </div>
 

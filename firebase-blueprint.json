@@ -14,11 +14,27 @@
         "gdprConsent": { "type": "boolean" },
         "companyName": { "type": "string", "maxLength": 140 },
         "companyWebsite": { "type": "string", "maxLength": 300 },
+        "moderationStatus": { "type": "string", "enum": ["approved", "pending", "rejected", "suspended"] },
+        "moderationNote": { "type": "string", "maxLength": 400 },
         "profile": { "type": "object" },
         "createdAt": { "type": "string", "format": "date-time" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "email", "fullName", "accountRole", "lang", "discoverable", "gdprConsent", "createdAt", "updatedAt"]
+    },
+    "AdminGrant": {
+      "title": "AdminGrant",
+      "description": "Authorized administrator privilege record granting full platform moderation access.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "email": { "type": "string", "format": "email", "maxLength": 200 },
+        "grantedBy": { "type": "string", "maxLength": 200 },
+        "note": { "type": "string", "maxLength": 300 },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "grantedBy", "createdAt", "updatedAt"]
     },
     "UserCv": {
       "title": "UserCv",
@@ -208,6 +224,10 @@
     }
   },
   "firestore": {
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminGrant" },
+      "description": "Authorized platform administrator role grants."
+    },
     "/users/{userId}": {
       "schema": { "$ref": "#/entities/UserAccount" },
       "description": "Private user account, PII, and workspace preferences."

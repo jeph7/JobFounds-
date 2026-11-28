@@ -26,6 +26,7 @@ import {
 } from './data/initialData';
 import { isRtlLang, t } from './i18n';
 import { auth, signInWithGooglePopup, signOutUser } from './firebase';
+import { LogOut, ShieldAlert } from 'lucide-react';
 import {
   checkIsAdminUser,
   createOrOpenConversation,
@@ -39,6 +40,7 @@ import {
   saveWatchlistItem,
   sendConversationMessage,
   subscribeOpenCompanyJobs,
+  subscribeOwnUserModeration,
   subscribePublicCandidates,
   subscribeUserApplications,
   subscribeUserConversations,
@@ -53,10 +55,12 @@ import {
   authFetchCurrentSession,
   authLogout,
   deleteServerWorkspace,
+  fetchServerEmployerJobs,
   fetchServerWorkspace,
   fetchUserNotifications,
   saveServerWorkspace,
   setAppSessionToken,
+  syncFirebaseDirectoryProfile,
 } from './utils/api';
 import { MobileBottomNav, Sidebar, TopHeader } from './components/Sidebar';
 import { BrandLogo } from './components/ui';
@@ -174,6 +178,11 @@ export default function App() {
     subTab?: 'tracker' | 'interview' | 'mobility';
   } | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
+  const [blockedAccount, setBlockedAccount] = useState<{
+    status: 'rejected' | 'suspended';
+    note?: string;
+    email?: string;
+  } | null>(null);
   const [accountRole, setAccountRole] = useState<AccountRole>(() =>
     loadStored<AccountRole>(STORAGE_KEYS.role, 'candidate')
   );
@@ -222,10 +231,22 @@ export default function App() {
   } | null>(null);
   const [applicationModalTarget, setApplicationModalTarget] =
     useState<ApplicationModalTarget | null>(null);
+  const [serverEmployerJobs, setServerEmployerJobs] = useState<CompanyJobDoc[]>([]);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const refreshServerEmployerJobs = () => {
+    fetchServerEmployerJobs(100)
+      .then((res) => setServerEmployerJobs(res.jobs || []))
+      .catch(() => {});
+  };
+
+  useEffect(() => {
+    refreshServerEmployerJobs();
+  }, []);
 
   const seededRef = useRef<Record<string, boolean>>({});
   const hydratedPasswordUidRef = useRef<string | null>(null);
+  const firebaseWorkspaceReadyRef = useRef(false);
   const passwordUserRef = useRef<AppAuthUser | null>(passwordUser);
   const cvVersionsRef = useRef(cvVersions);
   const profileRef = useRef(profile);
@@ -382,12 +403,14 @@ export default function App() {
     const unsubAuth = onAuthStateChanged(auth, async (user) => {
       unsubs.forEach((fn) => fn());
       unsubs = [];
+      firebaseWorkspaceReadyRef.current = false;
       setAuthUser(user);
 
       if (!user) {
         if (!passwordUserRef.current?.emailVerified) {
           setIsAdmin(false);
           setServerUnreadNotifs(0);
+          setBlockedAccount(null);
         }
         setCompanyJobs([]);
         setPublicCandidates([]);
@@ -396,7 +419,7 @@ export default function App() {
       }
 
       try {
-        const [account, adminFlag] = await Promise.all([
+        const [account, firestoreAdminFlag, serverSession] = await Promise.all([
           ensureUserAccount({
             uid: user.uid,
             email: user.email || '',
@@ -405,14 +428,82 @@ export default function App() {
             defaultProfile: profileRef.current,
           }),
           checkIsAdminUser(user.uid, user.email),
+          authFetchCurrentSession().catch(() => ({
+            authenticated: false,
+            blocked: false,
+            moderationStatus: undefined,
+            moderationNote: undefined,
+            error: undefined,
+            user: undefined,
+          })),
         ]);
 
-        setIsAdmin(adminFlag);
+        const isOwnerAccount =
+          (user.email || '').trim().toLowerCase() === 'guerrierjephly@gmail.com';
+        const isFsBlocked =
+          !isOwnerAccount &&
+          (account.moderationStatus === 'rejected' || account.moderationStatus === 'suspended');
+        const isServerBlocked = !isOwnerAccount && Boolean(serverSession.blocked);
+
+        const unsubModeration = subscribeOwnUserModeration(user.uid, (modInfo) => {
+          if (isOwnerAccount) return;
+          if (modInfo.moderationStatus === 'rejected' || modInfo.moderationStatus === 'suspended') {
+            setBlockedAccount({
+              status: modInfo.moderationStatus,
+              note: modInfo.moderationNote,
+              email: user.email || '',
+            });
+            setIsAdmin(false);
+            setCompanyJobs([]);
+            setPublicCandidates([]);
+            setConversations([]);
+          } else {
+            authFetchCurrentSession()
+              .then((fresh) => {
+                if (fresh.blocked) {
+                  setBlockedAccount({
+                    status: fresh.moderationStatus || 'suspended',
+                    note: fresh.moderationNote || fresh.error || '',
+                    email: user.email || '',
+                  });
+                } else {
+                  setBlockedAccount(null);
+                }
+              })
+              .catch(() => {});
+          }
+        });
+
+        if (isFsBlocked || isServerBlocked) {
+          const status = isFsBlocked
+            ? (account.moderationStatus as 'rejected' | 'suspended')
+            : serverSession.moderationStatus || 'suspended';
+          const note =
+            (isFsBlocked ? account.moderationNote : serverSession.moderationNote) ||
+            serverSession.error ||
+            '';
+          setBlockedAccount({
+            status,
+            note,
+            email: user.email || '',
+          });
+          setIsAdmin(false);
+          setServerUnreadNotifs(0);
+          setCompanyJobs([]);
+          setPublicCandidates([]);
+          setConversations([]);
+          unsubs = [unsubModeration];
+          return;
+        }
+
+        setBlockedAccount(null);
+        setIsAdmin(Boolean(firestoreAdminFlag || serverSession.user?.isAdmin));
         setAccountRole(account.accountRole);
         setDiscoverable(account.discoverable);
         setGdprConsent(account.gdprConsent);
         setCompanyName(account.companyName || '');
         setCompanyWebsite(account.companyWebsite || '');
+        let resolvedProfile = profileRef.current;
         if (account.profile) {
           const cleanProfile = isLegacyDemoProfile(account.profile)
             ? { ...initialCandidateProfile, fullName: user.displayName || '' }
@@ -420,9 +511,14 @@ export default function App() {
                 ...account.profile,
                 fullName: account.profile.fullName || user.displayName || '',
               };
+          resolvedProfile = cleanProfile;
           setProfile(cleanProfile);
         } else if (user.displayName && !profileRef.current.fullName) {
-          setProfile((prev) => ({ ...prev, fullName: user.displayName || prev.fullName }));
+          resolvedProfile = {
+            ...profileRef.current,
+            fullName: user.displayName || profileRef.current.fullName,
+          };
+          setProfile(resolvedProfile);
         }
 
         const unsubCvs = subscribeUserCvs(user.uid, (cloudCvs) => {
@@ -467,7 +563,24 @@ export default function App() {
           setConversations(items);
         });
 
+        // Mirror Google user directory & profile metadata into SQLite for unified Admin visibility
+        firebaseWorkspaceReadyRef.current = true;
+        syncFirebaseDirectoryProfile({
+          fullName: account.fullName || user.displayName || resolvedProfile.fullName || '',
+          accountRole: account.accountRole,
+          lang: account.lang,
+          discoverable: account.discoverable,
+          gdprConsent: account.gdprConsent,
+          companyName: account.companyName || '',
+          companyWebsite: account.companyWebsite || '',
+          profile: resolvedProfile,
+          cvs: cvVersionsRef.current.filter((cv) => !isLegacyDemoCv(cv)),
+          applications: applicationsRef.current,
+          watchlist: watchlistRef.current,
+        }).catch(() => {});
+
         unsubs = [
+          unsubModeration,
           unsubCvs,
           unsubApps,
           unsubWatch,
@@ -486,12 +599,60 @@ export default function App() {
     };
   }, []);
 
+  // Keep Google (Firebase) user directory & workspace mirrored to SQLite for Email/Password Admins
+  useEffect(() => {
+    if (!authUser || blockedAccount) return;
+    if (!firebaseWorkspaceReadyRef.current) return;
+
+    const timer = window.setTimeout(() => {
+      syncFirebaseDirectoryProfile({
+        fullName: profile.fullName || authUser.displayName || '',
+        accountRole,
+        lang,
+        discoverable,
+        gdprConsent,
+        companyName,
+        companyWebsite,
+        profile,
+        cvs: cvVersions.filter((cv) => !isLegacyDemoCv(cv)),
+        applications,
+        watchlist,
+      }).catch(() => {});
+    }, 700);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    authUser,
+    blockedAccount,
+    profile,
+    cvVersions,
+    applications,
+    watchlist,
+    accountRole,
+    lang,
+    discoverable,
+    gdprConsent,
+    companyName,
+    companyWebsite,
+  ]);
+
   // Restore persistent HttpOnly cookie session for Email/Password users across page refreshes
   useEffect(() => {
     let cancelled = false;
     authFetchCurrentSession()
       .then(async (session) => {
-        if (cancelled || !session.authenticated || !session.user) return;
+        if (cancelled) return;
+        if (session.blocked) {
+          setAppSessionToken(null);
+          setPasswordUser(null);
+          setIsAdmin(false);
+          setBlockedAccount({
+            status: session.moderationStatus || 'suspended',
+            note: session.moderationNote || session.error || '',
+          });
+          return;
+        }
+        if (!session.authenticated || !session.user) return;
         if (session.user.provider !== 'password') return;
         if (session.token) {
           setAppSessionToken(session.token);
@@ -516,7 +677,7 @@ export default function App() {
 
   // Auto-persist workspace mutations to SQLite for verified Email/Password accounts
   useEffect(() => {
-    if (authUser) return;
+    if (authUser || blockedAccount) return;
     if (!passwordUser?.emailVerified) return;
     if (hydratedPasswordUidRef.current !== passwordUser.uid) return;
 
@@ -538,6 +699,7 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [
     authUser,
+    blockedAccount,
     passwordUser,
     profile,
     cvVersions,
@@ -551,12 +713,25 @@ export default function App() {
     companyWebsite,
   ]);
 
-  // Merge live employer postings from Firestore with search jobs
+  // Merge live employer postings from SQLite (Email/Password + Google) & Firestore
+  const allCompanyJobs = useMemo(() => {
+    const merged: CompanyJobDoc[] = [];
+    const seen = new Set<string>();
+    for (const item of [...serverEmployerJobs, ...companyJobs]) {
+      const sig = `${item.recruiterId}::${item.companyName.toLowerCase()}::${item.title.toLowerCase()}`;
+      if (seen.has(item.id) || seen.has(sig)) continue;
+      seen.add(item.id);
+      seen.add(sig);
+      merged.push(item);
+    }
+    return merged;
+  }, [serverEmployerJobs, companyJobs]);
+
   const mergedJobs = useMemo(() => {
-    const employerListings = companyJobs.map(mapCompanyJobToListing);
+    const employerListings = allCompanyJobs.map(mapCompanyJobToListing);
     const seenIds = new Set(employerListings.map((j) => j.id));
     return [...employerListings, ...jobs.filter((j) => !seenIds.has(j.id))];
-  }, [companyJobs, jobs]);
+  }, [allCompanyJobs, jobs]);
 
   const trackedKeys = useMemo(
     () =>
@@ -680,10 +855,12 @@ export default function App() {
   const handleSignOut = async () => {
     try {
       hydratedPasswordUidRef.current = null;
+      firebaseWorkspaceReadyRef.current = false;
       await authLogout().catch(() => {});
       setPasswordUser(null);
       setAppSessionToken(null);
       setIsAdmin(false);
+      setBlockedAccount(null);
       setServerUnreadNotifs(0);
       setPendingNav(null);
       if (authUser) {
@@ -1091,6 +1268,64 @@ export default function App() {
     </div>
   );
 
+  // Hard Lockout Screen for Suspended or Rejected Accounts (enforced across client, server APIs & Firestore rules)
+  if (blockedAccount) {
+    const isRejected = blockedAccount.status === 'rejected';
+    return (
+      <div className="min-h-screen bg-jf-ice flex items-center justify-center p-6">
+        <div className="w-full max-w-lg bg-white border border-rose-200 rounded-2xl shadow-lg p-8 space-y-6 text-center">
+          <div className="flex justify-center">
+            <BrandLogo size="md" />
+          </div>
+          <div className="w-14 h-14 rounded-2xl bg-rose-50 border border-rose-200 flex items-center justify-center mx-auto">
+            <ShieldAlert className="w-7 h-7 text-rose-600" />
+          </div>
+          <div className="space-y-2">
+            <h1 className="font-display text-2xl font-bold text-jf-navy">
+              {isRejected
+                ? lang === 'fr'
+                  ? 'Accès refusé par un administrateur'
+                  : 'Account Rejected by Administrator'
+                : lang === 'fr'
+                  ? 'Compte temporairement suspendu'
+                  : 'Account Temporarily Suspended'}
+            </h1>
+            {blockedAccount.email && (
+              <p className="text-xs font-medium text-slate-500">{blockedAccount.email}</p>
+            )}
+            <p className="text-sm text-slate-600 leading-relaxed">
+              {isRejected
+                ? lang === 'fr'
+                  ? "Votre compte JOBFOUNDS a été refusé par l'équipe d'administration. L'accès à la plateforme et à ses services est bloqué."
+                  : 'Your JOBFOUNDS account has been rejected by an administrator. Access to the workspace and APIs is disabled.'
+                : lang === 'fr'
+                  ? "Votre compte JOBFOUNDS est actuellement suspendu par un administrateur. Vous ne pouvez plus accéder à l'espace de travail tant qu'un administrateur ne l'a pas réactivé."
+                  : 'Your JOBFOUNDS account is currently suspended by an administrator. Workspace access remains blocked until re-approved.'}
+            </p>
+          </div>
+          {blockedAccount.note && (
+            <div className="bg-rose-50 border border-rose-200 rounded-xl px-4 py-3 text-left">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-rose-700 mb-1">
+                {lang === 'fr' ? 'Motif indiqué par l’administrateur' : 'Administrator Note'}
+              </p>
+              <p className="text-sm text-rose-900">{blockedAccount.note}</p>
+            </div>
+          )}
+          <div className="pt-2 flex justify-center">
+            <button
+              type="button"
+              onClick={handleSignOut}
+              className="inline-flex items-center gap-2 px-5 py-2.5 rounded-xl bg-jf-navy text-white text-sm font-semibold hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <LogOut className="w-4 h-4" />
+              {lang === 'fr' ? 'Se déconnecter' : 'Sign out'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Full-Bleed Public Commercial Landing Page Mode + Mandatory Auth/Verification Gate
   // Unauthenticated or unverified users CANNOT enter the workspace until confirmed.
   if (activeTab === 'home' || !isVerifiedSignedIn) {
@@ -1270,7 +1505,14 @@ export default function App() {
               <CareerHub
                 lang={lang}
                 signedIn={isVerifiedSignedIn}
+                googleSignedIn={Boolean(authUser)}
                 onRequireSignIn={handleOpenLoginModal}
+                onConnectGoogle={() => void handleGoogleSignIn()}
+                onNotificationsChanged={() => {
+                  fetchUserNotifications()
+                    .then((res) => setServerUnreadNotifs(res.unreadCount || 0))
+                    .catch(() => {});
+                }}
                 profile={profile}
                 cvVersions={cvVersions}
                 applications={applications}
@@ -1287,6 +1529,7 @@ export default function App() {
               <WatchlistAlerts
                 lang={lang}
                 signedIn={isVerifiedSignedIn}
+                googleSignedIn={Boolean(authUser)}
                 profile={profile}
                 watchlist={watchlist}
                 onSaveWatchItem={handleSaveWatchItem}
@@ -1294,6 +1537,7 @@ export default function App() {
                 applications={applications}
                 onJumpToTracker={() => setActiveTab('career')}
                 onRequireSignIn={handleOpenLoginModal}
+                onConnectGoogle={() => void handleGoogleSignIn()}
                 onUnreadCountChange={setServerUnreadNotifs}
                 onNotify={showNotice}
               />
@@ -1303,13 +1547,15 @@ export default function App() {
               <RecruiterHub
                 lang={lang}
                 uid={verifiedAccount?.uid ?? null}
+                googleSignedIn={Boolean(authUser)}
                 userDisplayName={verifiedAccount?.displayName || profile.fullName}
                 accountRole={accountRole}
                 companyNameDefault={companyName}
                 companyWebsiteDefault={companyWebsite}
-                companyJobs={companyJobs}
+                companyJobs={allCompanyJobs}
                 publicCandidates={publicCandidates}
                 conversations={conversations}
+                onRefreshEmployerJobs={refreshServerEmployerJobs}
                 onRequireSignIn={handleOpenLoginModal}
                 onNotify={showNotice}
               />

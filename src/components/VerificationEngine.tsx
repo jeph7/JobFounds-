@@ -44,17 +44,6 @@ export function VerificationEngine({ lang, prefillJob, jobs }: VerificationEngin
     }
   }, [prefillJob]);
 
-  const loadSuspiciousSample = () => {
-    setCompanyName('Global Apex Ventures Logistics Ltd');
-    setJobTitle('Remote Data Entry & Payment Coordinator');
-    setJobUrl('https://apex-ventures-careers-apply.freehost.example');
-    setContactEmail('hr.recruiting.apex2026@gmail.com');
-    setSalaryOffered('9 500 EUR / mois (2h par jour, sans expérience)');
-    setJobText(
-      'Recrutement urgent sans entretien vidéo. Contactez notre responsable RH sur Telegram immédiatement. Une avance de 280 EUR remboursable est demandée pour le matériel informatique et la vérification de passeport.'
-    );
-  };
-
   const loadJobSample = (job: JobListing) => {
     setCompanyName(job.company);
     setJobTitle(job.title);
@@ -109,16 +98,9 @@ export function VerificationEngine({ lang, prefillJob, jobs }: VerificationEngin
                 onClick={() => loadJobSample(jobs[0])}
                 className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200/80 rounded-lg transition-colors whitespace-nowrap"
               >
-                {lang === 'fr' ? `Tester : ${jobs[0].company}` : `Test: ${jobs[0].company}`}
+                {lang === 'fr' ? `Charger : ${jobs[0].company}` : `Load: ${jobs[0].company}`}
               </button>
             )}
-            <button
-              type="button"
-              onClick={loadSuspiciousSample}
-              className="px-3 py-1.5 text-xs font-medium text-jf-navy bg-jf-soft hover:bg-jf-sky/70 border border-jf-sky rounded-lg transition-colors whitespace-nowrap"
-            >
-              {lang === 'fr' ? 'Tester un cas suspect' : 'Load Suspicious Test Case'}
-            </button>
           </div>
         </div>
 

@@ -173,6 +173,10 @@ export function authLogout() {
 
 export async function authFetchCurrentSession(): Promise<{
   authenticated: boolean;
+  blocked?: boolean;
+  moderationStatus?: 'rejected' | 'suspended';
+  moderationNote?: string;
+  error?: string;
   user?: AppAuthUser;
   token?: string;
 }> {
@@ -182,14 +186,40 @@ export async function authFetchCurrentSession(): Promise<{
       credentials: 'same-origin',
       headers: await getAuthHeaders(),
     });
+    const data = await res.json().catch(() => ({ authenticated: false }));
+    if (res.status === 403 && data?.code === 'ACCOUNT_MODERATED') {
+      return {
+        authenticated: false,
+        blocked: true,
+        moderationStatus:
+          data.moderationStatus === 'rejected' ? 'rejected' : 'suspended',
+        moderationNote: String(data.moderationNote || ''),
+        error: String(data.error || ''),
+      };
+    }
     if (!res.ok) {
       return { authenticated: false };
     }
-    const data = await res.json().catch(() => ({ authenticated: false }));
     return data as { authenticated: boolean; user?: AppAuthUser; token?: string };
   } catch {
     return { authenticated: false };
   }
+}
+
+export function syncFirebaseDirectoryProfile(payload: {
+  fullName?: string;
+  accountRole?: 'candidate' | 'recruiter';
+  lang?: string;
+  discoverable?: boolean;
+  gdprConsent?: boolean;
+  companyName?: string;
+  companyWebsite?: string;
+  profile?: CandidateProfile | null;
+  cvs?: CvDocument[];
+  applications?: any[];
+  watchlist?: any[];
+}) {
+  return requestJson<{ synced: boolean }>('POST', '/api/account/sync-directory', payload);
 }
 
 export interface ServerWorkspaceData {
@@ -741,6 +771,164 @@ export function adminScanAllCareers() {
 }
 
 // =============================================================================
+// ADMIN ONLY: PLATFORM USERS, FULL DOSSIERS, ADMIN ROLE MANAGEMENT & SUBMISSIONS
+// =============================================================================
+
+export type UserModerationStatus = 'approved' | 'pending' | 'rejected' | 'suspended';
+
+export interface AdminPlatformUserSummary {
+  uid: string;
+  email: string;
+  fullName: string;
+  provider: 'password' | 'firebase';
+  emailVerified: boolean;
+  verifiedAt: string | null;
+  accountRole: 'candidate' | 'recruiter';
+  isAdmin: boolean;
+  moderationStatus: UserModerationStatus;
+  moderationNote: string;
+  moderatedBy: string;
+  moderatedAt: string | null;
+  lang: string;
+  discoverable: boolean;
+  gdprConsent: boolean;
+  companyName: string;
+  companyWebsite: string;
+  currentTitle: string;
+  originCountry: string;
+  preferredCountries: string[];
+  skills: string[];
+  languages: string[];
+  cvsCount: number;
+  trackedAppsCount: number;
+  watchlistCount: number;
+  submittedAppsCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminRoleRecord {
+  email: string;
+  grantedBy: string;
+  note: string;
+  createdAt: string;
+  source: 'bootstrap' | 'env' | 'database';
+  removable: boolean;
+}
+
+export interface AdminSubmissionView {
+  id: string;
+  userId: string;
+  candidateName: string;
+  candidateEmail: string;
+  companyName: string;
+  roleTitle: string;
+  opportunityType: string;
+  channel: string;
+  recipientEmail: string;
+  officialUrl: string;
+  deliveryStatus: string;
+  transmitted: boolean;
+  employerStatus: string;
+  attachmentsCount: number;
+  adminModerationStatus: 'pending' | 'approved' | 'rejected';
+  adminModerationNote: string;
+  adminModeratedBy: string;
+  adminModeratedAt: string | null;
+  createdAt: string;
+}
+
+export interface AdminUserDossier {
+  summary: AdminPlatformUserSummary;
+  profile: Record<string, any> | null;
+  cvs: Array<{
+    id: string;
+    versionName: string;
+    fullName: string;
+    headline: string;
+    location: string;
+    skillsCount: number;
+    updatedAt: string;
+  }>;
+  trackedApplications: Array<{
+    id: string;
+    company: string;
+    role: string;
+    stage: string;
+    type: string;
+    dateAdded: string;
+  }>;
+  submittedApplications: AdminSubmissionView[];
+  notificationsCount: number;
+}
+
+export function fetchAdminPlatformUsers(search = '') {
+  const qs = search.trim() ? `?search=${encodeURIComponent(search.trim())}` : '';
+  return requestJson<{
+    users: AdminPlatformUserSummary[];
+    admins: AdminRoleRecord[];
+  }>('GET', `/api/admin/users${qs}`);
+}
+
+export function fetchAdminUserDossier(uid: string) {
+  return requestJson<{ dossier: AdminUserDossier }>(
+    'GET',
+    `/api/admin/users/${encodeURIComponent(uid)}`
+  );
+}
+
+export function adminModerateUser(
+  uid: string,
+  payload: {
+    email?: string;
+    moderationStatus?: UserModerationStatus;
+    moderationNote?: string;
+    emailVerified?: boolean;
+    accountRole?: 'candidate' | 'recruiter';
+    isAdmin?: boolean;
+  }
+) {
+  return requestJson<{ user: AppAuthUser }>(
+    'POST',
+    `/api/admin/users/${encodeURIComponent(uid)}/moderate`,
+    payload
+  );
+}
+
+export function adminGrantAdminRole(email: string, note = '') {
+  return requestJson<{
+    grant: AdminRoleRecord;
+    admins: AdminRoleRecord[];
+    message: string;
+  }>('POST', '/api/admin/admins/grant', { email, note });
+}
+
+export function adminRevokeAdminRole(email: string) {
+  return requestJson<{
+    revoked: boolean;
+    admins: AdminRoleRecord[];
+  }>('POST', '/api/admin/admins/revoke', { email });
+}
+
+export function fetchAdminSubmissions(limit = 120) {
+  return requestJson<{ submissions: AdminSubmissionView[] }>(
+    'GET',
+    `/api/admin/applications?limit=${limit}`
+  );
+}
+
+export function adminModerateSubmission(
+  submissionId: string,
+  payload: { status: 'pending' | 'approved' | 'rejected'; note?: string }
+) {
+  return requestJson<{ submission: AdminSubmissionView }>(
+    'POST',
+    `/api/admin/applications/${encodeURIComponent(submissionId)}/moderate`,
+    payload
+  );
+}
+
+// =============================================================================
 // MULTI-COUNTRY COMPANY DISCOVERY (MODULE 1) & GMAIL CRM SYNC (MODULE 7)
 // =============================================================================
 
@@ -1038,4 +1226,46 @@ export async function downloadAdminDeployBundle(): Promise<void> {
   link.remove();
   URL.revokeObjectURL(url);
 }
+
+// =============================================================================
+// DIRECT EMPLOYER JOB POSTINGS (EMAIL/PASSWORD + GOOGLE ACCOUNTS)
+// =============================================================================
+export function fetchServerEmployerJobs(limit = 100) {
+  return requestJson<{ jobs: import('../types').CompanyJobDoc[] }>(
+    'GET',
+    `/api/employer/jobs?limit=${limit}`
+  );
+}
+
+export function createServerEmployerJob(payload: {
+  companyName: string;
+  companyWebsite?: string;
+  title: string;
+  country?: string;
+  city?: string;
+  workMode?: import('../types').WorkMode;
+  contractType?: import('../types').ContractType;
+  experienceLevel?: string;
+  degreeRequired?: string;
+  salaryRange?: string;
+  skills?: string[];
+  languages?: string[];
+  description: string;
+  visaSponsorship?: string;
+}) {
+  return requestJson<{ job: import('../types').CompanyJobDoc }>(
+    'POST',
+    '/api/employer/jobs',
+    payload
+  );
+}
+
+export function closeServerEmployerJob(jobId: string) {
+  return requestJson<{ ok: boolean; id: string }>(
+    'POST',
+    `/api/employer/jobs/${encodeURIComponent(jobId)}/close`,
+    {}
+  );
+}
+
 

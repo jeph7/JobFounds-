@@ -295,25 +295,39 @@ export const ApplicationSubmissionModal: React.FC<ApplicationSubmissionModalProp
         country: target.location,
         lang,
       });
-      const mapped: HrContactRecord[] = (res.contacts || []).map((c, idx) => ({
-        id: `live_cnt_${idx}_${Date.now()}`,
-        companyId: target.companyId || '',
-        companyName: target.companyName,
-        fullName: c.nameOrTitle,
-        roleTitle: c.role,
-        department: '',
-        location: c.location || target.location,
-        contactChannel: c.channel,
-        publicUrl: c.publicUrl,
-        corporateEmail: '',
-        domainMxVerified: res.emailDomainStatus === 'Verified',
-        confidenceLevel: c.publicUrl ? 'probable' : 'unverified',
-        sourceName: 'Public Web Grounding',
-        sourceUrl: c.publicUrl,
-        verifiedAt: new Date().toISOString(),
-        adminStatus: 'pending',
-        createdAt: new Date().toISOString(),
-      }));
+      const mapped: HrContactRecord[] = (res.contacts || []).map((c, idx) => {
+        const channelEmailMatch = String(c.channel || '').match(
+          /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i
+        );
+        const rawEmail = (c.corporateEmail || channelEmailMatch?.[0] || '').trim().toLowerCase();
+        const publicEmail =
+          rawEmail && !/@(gmail|yahoo|hotmail|outlook|live|proton)\./i.test(rawEmail)
+            ? rawEmail
+            : '';
+        const mxOk = Boolean(c.domainMxVerified ?? (res.emailDomainStatus === 'Verified'));
+        const confidence: HrContactRecord['confidenceLevel'] =
+          c.confidenceLevel ||
+          (c.publicUrl || (publicEmail && mxOk) ? 'probable' : 'unverified');
+        return {
+          id: `live_cnt_${idx}_${Date.now()}`,
+          companyId: target.companyId || '',
+          companyName: target.companyName,
+          fullName: c.nameOrTitle,
+          roleTitle: c.role,
+          department: '',
+          location: c.location || target.location,
+          contactChannel: c.channel,
+          publicUrl: c.publicUrl,
+          corporateEmail: publicEmail,
+          domainMxVerified: mxOk,
+          confidenceLevel: confidence,
+          sourceName: 'Public Web Grounding',
+          sourceUrl: c.publicUrl,
+          verifiedAt: new Date().toISOString(),
+          adminStatus: 'pending',
+          createdAt: new Date().toISOString(),
+        };
+      });
       if (mapped.length > 0) {
         setHrContacts((prev) => {
           const existingKeys = new Set(prev.map((x) => x.fullName.toLowerCase()));
@@ -1060,13 +1074,28 @@ export const ApplicationSubmissionModal: React.FC<ApplicationSubmissionModalProp
                     >
                       <div className="flex items-center justify-between gap-2">
                         <span className="font-semibold text-slate-900">{c.fullName}</span>
-                        <span className="text-[10px] font-medium uppercase tracking-wide text-slate-600">
-                          {c.confidenceLevel === 'confirmed'
-                            ? 'Confirmé'
-                            : c.confidenceLevel === 'probable'
-                              ? 'Probable'
-                              : 'À vérifier'}
-                        </span>
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          {c.domainMxVerified && (
+                            <span className="rounded bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 text-[10px] font-mono text-emerald-800">
+                              MX OK
+                            </span>
+                          )}
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${
+                              c.confidenceLevel === 'confirmed'
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                : c.confidenceLevel === 'probable'
+                                  ? 'bg-sky-50 text-sky-900 border border-sky-200'
+                                  : 'bg-amber-50 text-amber-800 border border-amber-200'
+                            }`}
+                          >
+                            {c.confidenceLevel === 'confirmed'
+                              ? 'Vérifié'
+                              : c.confidenceLevel === 'probable'
+                                ? 'Source publique · À confirmer'
+                                : 'Non vérifié'}
+                          </span>
+                        </div>
                       </div>
                       <p className="text-slate-600">{c.roleTitle}</p>
                       <div className="flex flex-wrap items-center gap-2 pt-1">

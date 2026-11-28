@@ -53,7 +53,16 @@ export interface UserAccountDoc {
   gdprConsent: boolean;
   companyName?: string;
   companyWebsite?: string;
+  moderationStatus?: 'approved' | 'pending' | 'rejected' | 'suspended';
+  moderationNote?: string;
   profile?: CandidateProfile;
+}
+
+export interface FirestoreAdminGrant {
+  uid: string;
+  email: string;
+  grantedBy: string;
+  note?: string;
 }
 
 export async function ensureUserAccount(params: {
@@ -79,6 +88,8 @@ export async function ensureUserAccount(params: {
         gdprConsent: Boolean(data.gdprConsent),
         companyName: data.companyName || '',
         companyWebsite: data.companyWebsite || '',
+        moderationStatus: data.moderationStatus || 'approved',
+        moderationNote: data.moderationNote || '',
         profile: data.profile || params.defaultProfile,
       };
     }
@@ -127,6 +138,36 @@ export async function updateUserAccount(
   } catch (err) {
     handleFirestoreError(err, OperationType.UPDATE, path);
   }
+}
+
+export function subscribeOwnUserModeration(
+  uid: string,
+  onUpdate: (info: {
+    moderationStatus: 'approved' | 'pending' | 'rejected' | 'suspended';
+    moderationNote: string;
+  }) => void
+): () => void {
+  const ref = doc(db, 'users', uid);
+  return onSnapshot(
+    ref,
+    (snap) => {
+      if (!snap.exists()) return;
+      const data = snap.data() as any;
+      const status =
+        data.moderationStatus === 'rejected' ||
+        data.moderationStatus === 'suspended' ||
+        data.moderationStatus === 'pending'
+          ? data.moderationStatus
+          : 'approved';
+      onUpdate({
+        moderationStatus: status,
+        moderationNote: typeof data.moderationNote === 'string' ? data.moderationNote : '',
+      });
+    },
+    () => {
+      // Ignore transient listener permission errors while auth transitions
+    }
+  );
 }
 
 export async function syncPublicCandidateDirectory(
@@ -749,12 +790,150 @@ export function subscribeAllUsersAdmin(onData: (items: UserAccountDoc[]) => void
             gdprConsent: Boolean(data.gdprConsent),
             companyName: data.companyName || '',
             companyWebsite: data.companyWebsite || '',
+            moderationStatus: data.moderationStatus || 'approved',
+            moderationNote: data.moderationNote || '',
+            profile: data.profile || undefined,
           };
         })
       );
     },
     (err) => handleFirestoreError(err, OperationType.LIST, path)
   );
+}
+
+export function subscribeAllAdminsFirestore(onData: (items: FirestoreAdminGrant[]) => void) {
+  const path = 'admins';
+  return onSnapshot(
+    collection(db, 'admins'),
+    (snap) => {
+      onData(
+        snap.docs.map((d) => {
+          const data = d.data() as any;
+          return {
+            uid: data.uid || d.id,
+            email: data.email || '',
+            grantedBy: data.grantedBy || '',
+            note: data.note || '',
+          };
+        })
+      );
+    },
+    (err) => handleFirestoreError(err, OperationType.LIST, path)
+  );
+}
+
+export async function adminGrantFirestoreAdmin(params: {
+  uid: string;
+  email: string;
+  grantedBy: string;
+  note?: string;
+}): Promise<void> {
+  const id = cleanId(params.uid);
+  const path = `admins/${id}`;
+  const ref = doc(db, 'admins', id);
+  try {
+    const snap = await getDoc(ref);
+    const payload = {
+      uid: id,
+      email: cap(params.email, 200).toLowerCase(),
+      grantedBy: cap(params.grantedBy, 200).toLowerCase() || BOOTSTRAP_ADMIN_EMAIL,
+      note: cap(params.note, 300) || 'Nommé administrateur',
+      updatedAt: serverTimestamp(),
+    };
+    if (snap.exists()) {
+      await updateDoc(ref, payload);
+    } else {
+      await setDoc(ref, {
+        ...payload,
+        createdAt: serverTimestamp(),
+      });
+    }
+  } catch (err) {
+    handleFirestoreError(err, OperationType.WRITE, path);
+  }
+}
+
+export async function adminRevokeFirestoreAdmin(uid: string): Promise<void> {
+  const id = cleanId(uid);
+  const path = `admins/${id}`;
+  try {
+    await deleteDoc(doc(db, 'admins', id));
+  } catch (err) {
+    handleFirestoreError(err, OperationType.DELETE, path);
+  }
+}
+
+export async function adminModerateFirestoreUser(
+  uid: string,
+  updates: {
+    accountRole?: AccountRole;
+    moderationStatus?: 'approved' | 'pending' | 'rejected' | 'suspended';
+    moderationNote?: string;
+  }
+): Promise<void> {
+  const id = cleanId(uid);
+  const path = `users/${id}`;
+  try {
+    const payload: Record<string, any> = { updatedAt: serverTimestamp() };
+    if (updates.accountRole) payload.accountRole = updates.accountRole;
+    if (updates.moderationStatus) payload.moderationStatus = updates.moderationStatus;
+    if (typeof updates.moderationNote === 'string') {
+      payload.moderationNote = cap(updates.moderationNote, 400);
+    }
+    await updateDoc(doc(db, 'users', id), payload);
+  } catch (err) {
+    handleFirestoreError(err, OperationType.UPDATE, path);
+  }
+}
+
+export async function adminFetchFirestoreUserDetails(uid: string): Promise<{
+  cvs: Array<{
+    id: string;
+    versionName: string;
+    fullName: string;
+    headline: string;
+    location: string;
+    skillsCount: number;
+    updatedAt: string;
+  }>;
+  trackedApplications: Array<{
+    id: string;
+    company: string;
+    role: string;
+    stage: string;
+    type: string;
+    dateAdded: string;
+  }>;
+}> {
+  const [cvsSnap, appsSnap] = await Promise.all([
+    getDocs(collection(db, 'users', uid, 'cvs')),
+    getDocs(collection(db, 'users', uid, 'applications')),
+  ]);
+  return {
+    cvs: cvsSnap.docs.map((d) => {
+      const data = d.data() as any;
+      return {
+        id: data.id || d.id,
+        versionName: data.versionName || 'CV',
+        fullName: data.fullName || '',
+        headline: data.headline || '',
+        location: data.location || '',
+        skillsCount: Array.isArray(data.skills) ? data.skills.length : 0,
+        updatedAt: data.updatedDate || '',
+      };
+    }),
+    trackedApplications: appsSnap.docs.map((d) => {
+      const data = d.data() as any;
+      return {
+        id: data.id || d.id,
+        company: data.company || '',
+        role: data.role || '',
+        stage: data.stage || '',
+        type: data.type || '',
+        dateAdded: data.dateAdded || '',
+      };
+    }),
+  };
 }
 
 export function subscribeAllConversationsAdmin(onData: (items: ConversationDoc[]) => void) {

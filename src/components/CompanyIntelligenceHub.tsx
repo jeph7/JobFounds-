@@ -141,9 +141,9 @@ export function CompanyIntelligenceHub({
 
   // Multi-country automated discovery form (Module 1)
   const [showDiscoverForm, setShowDiscoverForm] = useState(false);
-  const [discoverCountries, setDiscoverCountries] = useState('France, Canada, Allemagne, Suisse');
-  const [discoverSector, setDiscoverSector] = useState('FinTech, IA & Cloud SaaS');
-  const [discoverKeywords, setDiscoverKeywords] = useState('expansion, levée de fonds, nouveau bureau');
+  const [discoverCountries, setDiscoverCountries] = useState('');
+  const [discoverSector, setDiscoverSector] = useState('');
+  const [discoverKeywords, setDiscoverKeywords] = useState('');
   const [discovering, setDiscovering] = useState(false);
   const [discoverSummary, setDiscoverSummary] = useState<string | null>(null);
 
@@ -1394,11 +1394,25 @@ export function CompanyIntelligenceHub({
                   {detail.contacts.length === 0 ? (
                     <div className="py-10 text-center text-xs text-slate-500 border border-dashed border-jf-border rounded-xl">
                       {lang === 'fr'
-                        ? 'Aucun contact RH vérifié enregistré pour cette entreprise.'
-                        : 'No verified HR contacts recorded yet.'}
+                        ? 'Aucun contact RH public enregistré pour cette entreprise. JOBFOUNDS n’invente jamais de contact.'
+                        : 'No public HR contacts recorded yet. JOBFOUNDS never invents contacts.'}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <>
+                      <div className="flex flex-wrap items-center gap-3 text-xs px-3.5 py-2 rounded-lg bg-white border border-jf-border">
+                        <span className="font-semibold text-jf-navy">
+                          {detail.contacts.length} {lang === 'fr' ? 'contact(s) identifié(s)' : 'identified contact(s)'}
+                        </span>
+                        <span className="text-emerald-700 font-medium">
+                          ✓ {detail.contacts.filter((c) => c.confidenceLevel === 'confirmed' || (c.domainMxVerified && Boolean(c.corporateEmail))).length}{' '}
+                          {lang === 'fr' ? 'vérifié(s) (source publique / MX)' : 'verified (public / MX)'}
+                        </span>
+                        <span className="text-amber-700 font-medium">
+                          • {detail.contacts.filter((c) => !(c.confidenceLevel === 'confirmed' || (c.domainMxVerified && Boolean(c.corporateEmail)))).length}{' '}
+                          {lang === 'fr' ? 'non vérifié(s) / à confirmer' : 'unverified / to confirm'}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {detail.contacts.map((ct) => {
                         const conf = confidenceLabel(ct.confidenceLevel, lang);
                         const pubHref = safeExternalUrl(ct.publicUrl || ct.sourceUrl);
@@ -1466,7 +1480,8 @@ export function CompanyIntelligenceHub({
                           </div>
                         );
                       })}
-                    </div>
+                      </div>
+                    </>
                   )}
                 </div>
               )}

@@ -5,8 +5,10 @@ import path from 'path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'url';
 import {
+  BOOTSTRAP_ADMIN_EMAIL,
   clampStr,
   extractDomainFromUrl,
+  getConfiguredEnvAdminEmails,
   normalizeCanonicalName,
   sanitizeHttpUrl,
 } from './serverSecurity.ts';
@@ -648,6 +650,31 @@ export function getEngineDb(): DatabaseSync {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS employer_jobs (
+      id TEXT PRIMARY KEY,
+      recruiter_id TEXT NOT NULL,
+      company_name TEXT NOT NULL,
+      company_website TEXT DEFAULT '',
+      title TEXT NOT NULL,
+      country TEXT NOT NULL DEFAULT 'International',
+      city TEXT NOT NULL DEFAULT 'Remote',
+      work_mode TEXT NOT NULL DEFAULT 'Hybrid',
+      contract_type TEXT NOT NULL DEFAULT 'Full-time',
+      experience_level TEXT NOT NULL DEFAULT 'Mid-Senior',
+      degree_required TEXT NOT NULL DEFAULT 'Non spécifié',
+      salary_range TEXT NOT NULL DEFAULT 'Non communiqué',
+      skills_json TEXT NOT NULL DEFAULT '[]',
+      languages_json TEXT NOT NULL DEFAULT '["Français","Anglais"]',
+      description TEXT NOT NULL,
+      visa_sponsorship TEXT NOT NULL DEFAULT 'Case-by-case',
+      status TEXT NOT NULL DEFAULT 'open',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_employer_jobs_status_created ON employer_jobs(status, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_employer_jobs_recruiter ON employer_jobs(recruiter_id);
+
     CREATE INDEX IF NOT EXISTS idx_app_submissions_user ON application_submissions(user_id, created_at DESC);
 
     CREATE TABLE IF NOT EXISTS auth_users (
@@ -700,7 +727,16 @@ export function getEngineDb(): DatabaseSync {
   safeAddColumn('application_submissions', "employer_status TEXT DEFAULT 'received'");
   safeAddColumn('application_submissions', "employer_reply TEXT DEFAULT ''");
   safeAddColumn('application_submissions', 'employer_replied_at TEXT');
+  safeAddColumn('application_submissions', "admin_moderation_status TEXT NOT NULL DEFAULT 'pending'");
+  safeAddColumn('application_submissions', "admin_moderation_note TEXT NOT NULL DEFAULT ''");
+  safeAddColumn('application_submissions', "admin_moderated_by TEXT NOT NULL DEFAULT ''");
+  safeAddColumn('application_submissions', 'admin_moderated_at TEXT');
   safeAddColumn('email_verification_codes', "purpose TEXT NOT NULL DEFAULT 'verify_email'");
+  safeAddColumn('auth_users', 'is_admin INTEGER NOT NULL DEFAULT 0');
+  safeAddColumn('auth_users', "moderation_status TEXT NOT NULL DEFAULT 'approved'");
+  safeAddColumn('auth_users', "moderation_note TEXT NOT NULL DEFAULT ''");
+  safeAddColumn('auth_users', "moderated_by TEXT NOT NULL DEFAULT ''");
+  safeAddColumn('auth_users', 'moderated_at TEXT');
   db.exec(
     'CREATE INDEX IF NOT EXISTS idx_app_submissions_recruiter ON application_submissions(recruiter_id, created_at DESC);'
   );
@@ -719,7 +755,89 @@ export function getEngineDb(): DatabaseSync {
       company_website TEXT NOT NULL DEFAULT '',
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS admin_roles (
+      email TEXT PRIMARY KEY,
+      granted_by TEXT NOT NULL DEFAULT '',
+      note TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS account_directory (
+      email TEXT PRIMARY KEY,
+      uid TEXT NOT NULL,
+      full_name TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT 'firebase',
+      account_role TEXT NOT NULL DEFAULT 'candidate',
+      moderation_status TEXT NOT NULL DEFAULT 'approved',
+      moderation_note TEXT NOT NULL DEFAULT '',
+      moderated_by TEXT NOT NULL DEFAULT '',
+      moderated_at TEXT,
+      lang TEXT NOT NULL DEFAULT 'fr',
+      discoverable INTEGER NOT NULL DEFAULT 0,
+      gdpr_consent INTEGER NOT NULL DEFAULT 1,
+      company_name TEXT NOT NULL DEFAULT '',
+      company_website TEXT NOT NULL DEFAULT '',
+      profile_json TEXT NOT NULL DEFAULT '{}',
+      cvs_count INTEGER NOT NULL DEFAULT 0,
+      tracked_apps_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_account_directory_uid ON account_directory(uid);
   `);
+
+  // Safe idempotent migration for account_directory if created with earlier draft columns
+  const dirColsInitial = new Set(
+    (
+      db.prepare('PRAGMA table_info(account_directory)').all() as Array<{ name: string }>
+    ).map((c) => c.name)
+  );
+  if (dirColsInitial.has('last_seen_at') && !dirColsInitial.has('profile_json')) {
+    db.exec(`
+      DROP TABLE IF EXISTS account_directory;
+      CREATE TABLE account_directory (
+        email TEXT PRIMARY KEY,
+        uid TEXT NOT NULL,
+        full_name TEXT NOT NULL DEFAULT '',
+        provider TEXT NOT NULL DEFAULT 'firebase',
+        account_role TEXT NOT NULL DEFAULT 'candidate',
+        moderation_status TEXT NOT NULL DEFAULT 'approved',
+        moderation_note TEXT NOT NULL DEFAULT '',
+        moderated_by TEXT NOT NULL DEFAULT '',
+        moderated_at TEXT,
+        lang TEXT NOT NULL DEFAULT 'fr',
+        discoverable INTEGER NOT NULL DEFAULT 0,
+        gdpr_consent INTEGER NOT NULL DEFAULT 1,
+        company_name TEXT NOT NULL DEFAULT '',
+        company_website TEXT NOT NULL DEFAULT '',
+        profile_json TEXT NOT NULL DEFAULT '{}',
+        cvs_count INTEGER NOT NULL DEFAULT 0,
+        tracked_apps_count INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_account_directory_uid ON account_directory(uid);
+    `);
+  }
+  const dirCols = new Set(
+    (
+      db.prepare('PRAGMA table_info(account_directory)').all() as Array<{ name: string }>
+    ).map((c) => c.name)
+  );
+  const ensureDirCol = (name: string, ddl: string) => {
+    if (!dirCols.has(name)) {
+      db.exec(`ALTER TABLE account_directory ADD COLUMN ${name} ${ddl}`);
+    }
+  };
+  ensureDirCol('moderated_by', "TEXT NOT NULL DEFAULT ''");
+  ensureDirCol('moderated_at', 'TEXT');
+  ensureDirCol('lang', "TEXT NOT NULL DEFAULT 'fr'");
+  ensureDirCol('discoverable', 'INTEGER NOT NULL DEFAULT 0');
+  ensureDirCol('gdpr_consent', 'INTEGER NOT NULL DEFAULT 1');
+  ensureDirCol('profile_json', "TEXT NOT NULL DEFAULT '{}'");
+  ensureDirCol('cvs_count', 'INTEGER NOT NULL DEFAULT 0');
+  ensureDirCol('tracked_apps_count', 'INTEGER NOT NULL DEFAULT 0');
 
   // Initialize real external source registry (connector definitions only — zero fake business data)
   const defaultSources: Array<{
@@ -2582,6 +2700,8 @@ export function createEngineDbBackup(reason = 'scheduled', keepLatest = 7): Engi
 // AUTHENTICATION ACCOUNTS & 5-DIGIT EMAIL VERIFICATION CODE STORAGE
 // =============================================================================
 
+export type UserModerationStatus = 'approved' | 'pending' | 'rejected' | 'suspended';
+
 export interface AuthUserRecord {
   uid: string;
   email: string;
@@ -2591,6 +2711,11 @@ export interface AuthUserRecord {
   emailVerified: boolean;
   verifiedAt: string | null;
   accountRole: 'candidate' | 'recruiter';
+  isAdmin: boolean;
+  moderationStatus: UserModerationStatus;
+  moderationNote: string;
+  moderatedBy: string;
+  moderatedAt: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -2627,6 +2752,9 @@ export interface UserWorkspaceRecord {
 }
 
 function mapAuthUserRow(row: Record<string, any>): AuthUserRecord {
+  const rawMod = String(row.moderation_status || 'approved');
+  const moderationStatus: UserModerationStatus =
+    rawMod === 'pending' || rawMod === 'rejected' || rawMod === 'suspended' ? rawMod : 'approved';
   return {
     uid: String(row.uid),
     email: String(row.email),
@@ -2636,6 +2764,11 @@ function mapAuthUserRow(row: Record<string, any>): AuthUserRecord {
     emailVerified: Boolean(row.email_verified),
     verifiedAt: row.verified_at ? String(row.verified_at) : null,
     accountRole: row.account_role === 'recruiter' ? 'recruiter' : 'candidate',
+    isAdmin: Boolean(row.is_admin),
+    moderationStatus,
+    moderationNote: String(row.moderation_note || ''),
+    moderatedBy: String(row.moderated_by || ''),
+    moderatedAt: row.moderated_at ? String(row.moderated_at) : null,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -2935,5 +3068,1134 @@ export function deleteUserWorkspaceData(uid: string): void {
   const db = getEngineDb();
   db.prepare('DELETE FROM user_workspace_data WHERE uid = ?').run(uid);
 }
+
+// =============================================================================
+// ADMIN ROLES, FULL USER INSPECTION & PLATFORM MODERATION (SQLite)
+// =============================================================================
+
+export interface AdminRoleRecord {
+  email: string;
+  source: 'bootstrap' | 'env' | 'database';
+  grantedBy: string;
+  note: string;
+  createdAt: string;
+  removable: boolean;
+}
+
+export interface AdminPlatformUserSummary {
+  uid: string;
+  email: string;
+  fullName: string;
+  provider: 'password' | 'firebase';
+  emailVerified: boolean;
+  verifiedAt: string | null;
+  accountRole: 'candidate' | 'recruiter';
+  isAdmin: boolean;
+  moderationStatus: UserModerationStatus;
+  moderationNote: string;
+  moderatedBy: string;
+  moderatedAt: string | null;
+  lang: string;
+  discoverable: boolean;
+  gdprConsent: boolean;
+  companyName: string;
+  companyWebsite: string;
+  currentTitle: string;
+  originCountry: string;
+  preferredCountries: string[];
+  skills: string[];
+  languages: string[];
+  cvsCount: number;
+  trackedAppsCount: number;
+  watchlistCount: number;
+  submittedAppsCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AdminSubmissionView {
+  id: string;
+  userId: string;
+  candidateName: string;
+  candidateEmail: string;
+  companyName: string;
+  roleTitle: string;
+  opportunityType: string;
+  channel: string;
+  recipientEmail: string;
+  officialUrl: string;
+  deliveryStatus: string;
+  transmitted: boolean;
+  employerStatus: string;
+  attachmentsCount: number;
+  adminModerationStatus: 'pending' | 'approved' | 'rejected';
+  adminModerationNote: string;
+  adminModeratedBy: string;
+  adminModeratedAt: string | null;
+  createdAt: string;
+}
+
+export function isEmailInAdminRoles(email: string): boolean {
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return false;
+  try {
+    const db = getEngineDb();
+    const roleRow = db
+      .prepare('SELECT email FROM admin_roles WHERE email = ? LIMIT 1')
+      .get(normalized) as { email?: string } | undefined;
+    if (roleRow?.email) return true;
+
+    const userRow = db
+      .prepare('SELECT is_admin FROM auth_users WHERE email = ? LIMIT 1')
+      .get(normalized) as { is_admin?: number } | undefined;
+    return Boolean(userRow?.is_admin);
+  } catch {
+    return false;
+  }
+}
+
+export function listAdminRoleRecords(): AdminRoleRecord[] {
+  const db = getEngineDb();
+  const map = new Map<string, AdminRoleRecord>();
+
+  map.set(BOOTSTRAP_ADMIN_EMAIL, {
+    email: BOOTSTRAP_ADMIN_EMAIL,
+    source: 'bootstrap',
+    grantedBy: 'system',
+    note: 'Propriétaire principal JOBFOUNDS',
+    createdAt: '',
+    removable: false,
+  });
+
+  for (const envEmail of getConfiguredEnvAdminEmails()) {
+    if (!map.has(envEmail)) {
+      map.set(envEmail, {
+        email: envEmail,
+        source: 'env',
+        grantedBy: 'ADMIN_EMAILS',
+        note: 'Configuré via variable d’environnement',
+        createdAt: '',
+        removable: false,
+      });
+    }
+  }
+
+  const rows = db
+    .prepare('SELECT email, granted_by, note, created_at FROM admin_roles ORDER BY created_at DESC')
+    .all() as Array<Record<string, any>>;
+
+  for (const row of rows) {
+    const email = String(row.email || '').trim().toLowerCase();
+    if (!email || map.has(email)) continue;
+    map.set(email, {
+      email,
+      source: 'database',
+      grantedBy: String(row.granted_by || ''),
+      note: String(row.note || ''),
+      createdAt: String(row.created_at || ''),
+      removable: email !== BOOTSTRAP_ADMIN_EMAIL,
+    });
+  }
+
+  return Array.from(map.values());
+}
+
+export function grantAdminRoleByEmail(
+  email: string,
+  grantedBy: string,
+  note = ''
+): AdminRoleRecord {
+  const db = getEngineDb();
+  const normalized = email.trim().toLowerCase();
+  const now = new Date().toISOString();
+  const safeNote = clampStr(note, 240);
+  const safeBy = clampStr(grantedBy, 200);
+
+  db.prepare(
+    `INSERT INTO admin_roles (email, granted_by, note, created_at)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(email) DO UPDATE SET
+       granted_by = excluded.granted_by,
+       note = excluded.note`
+  ).run(normalized, safeBy, safeNote, now);
+
+  // If a password account already exists with this email, mark it admin & verified immediately
+  db.prepare(
+    `UPDATE auth_users
+     SET is_admin = 1,
+         email_verified = 1,
+         verified_at = COALESCE(verified_at, ?),
+         moderation_status = 'approved',
+         updated_at = ?
+     WHERE email = ?`
+  ).run(now, now, normalized);
+
+  return {
+    email: normalized,
+    source: normalized === BOOTSTRAP_ADMIN_EMAIL ? 'bootstrap' : 'database',
+    grantedBy: safeBy,
+    note: safeNote,
+    createdAt: now,
+    removable: normalized !== BOOTSTRAP_ADMIN_EMAIL,
+  };
+}
+
+export function revokeAdminRoleByEmail(email: string): { ok: boolean; reason?: string } {
+  const normalized = email.trim().toLowerCase();
+  if (normalized === BOOTSTRAP_ADMIN_EMAIL) {
+    return {
+      ok: false,
+      reason: 'Impossible de retirer les droits du compte propriétaire principal.',
+    };
+  }
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  db.prepare('DELETE FROM admin_roles WHERE email = ?').run(normalized);
+  db.prepare('UPDATE auth_users SET is_admin = 0, updated_at = ? WHERE email = ?').run(
+    now,
+    normalized
+  );
+  return { ok: true };
+}
+
+export function upsertAccountDirectoryEntry(input: {
+  uid: string;
+  email: string;
+  fullName?: string;
+  provider?: 'firebase' | 'password';
+  accountRole?: 'candidate' | 'recruiter';
+  lang?: string;
+  discoverable?: boolean;
+  gdprConsent?: boolean;
+  companyName?: string;
+  companyWebsite?: string;
+  profile?: Record<string, any> | null;
+  cvsCount?: number;
+  trackedAppsCount?: number;
+}): void {
+  const email = input.email.trim().toLowerCase();
+  if (!email || !email.includes('@')) return;
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  const existing = db
+    .prepare('SELECT * FROM account_directory WHERE email = ? LIMIT 1')
+    .get(email) as Record<string, any> | undefined;
+
+  const nextUid = clampStr(input.uid || String(existing?.uid || ''), 128);
+  const nextName = clampStr(
+    input.fullName || String(existing?.full_name || email.split('@')[0] || 'Membre'),
+    120
+  );
+  const nextProvider =
+    input.provider || (existing?.provider === 'password' ? 'password' : 'firebase');
+  const nextRole =
+    input.accountRole === 'recruiter' || input.accountRole === 'candidate'
+      ? input.accountRole
+      : existing?.account_role === 'recruiter'
+        ? 'recruiter'
+        : 'candidate';
+  const nextLang = clampStr(input.lang || String(existing?.lang || 'fr'), 10) || 'fr';
+  const nextDiscoverable =
+    typeof input.discoverable === 'boolean'
+      ? input.discoverable
+        ? 1
+        : 0
+      : Number(existing?.discoverable || 0);
+  const nextGdpr =
+    typeof input.gdprConsent === 'boolean'
+      ? input.gdprConsent
+        ? 1
+        : 0
+      : existing
+        ? Number(existing.gdpr_consent ?? 1)
+        : 1;
+  const nextCompany =
+    typeof input.companyName === 'string'
+      ? clampStr(input.companyName, 140)
+      : String(existing?.company_name || '');
+  const nextWebsite =
+    typeof input.companyWebsite === 'string'
+      ? clampStr(input.companyWebsite, 300)
+      : String(existing?.company_website || '');
+  const nextProfileJson =
+    input.profile !== undefined && input.profile !== null
+      ? JSON.stringify(input.profile)
+      : String(existing?.profile_json || '{}');
+  const nextCvsCount =
+    typeof input.cvsCount === 'number'
+      ? Math.max(0, Math.round(input.cvsCount))
+      : Number(existing?.cvs_count || 0);
+  const nextTrackedCount =
+    typeof input.trackedAppsCount === 'number'
+      ? Math.max(0, Math.round(input.trackedAppsCount))
+      : Number(existing?.tracked_apps_count || 0);
+
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO account_directory (
+        email, uid, full_name, provider, account_role, moderation_status, moderation_note,
+        moderated_by, moderated_at, lang, discoverable, gdpr_consent, company_name,
+        company_website, profile_json, cvs_count, tracked_apps_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, 'approved', '', '', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      email,
+      nextUid,
+      nextName,
+      nextProvider,
+      nextRole,
+      nextLang,
+      nextDiscoverable,
+      nextGdpr,
+      nextCompany,
+      nextWebsite,
+      nextProfileJson,
+      nextCvsCount,
+      nextTrackedCount,
+      now,
+      now
+    );
+  } else {
+    // NEVER overwrite moderation_status or moderation_note on user-initiated sync
+    db.prepare(
+      `UPDATE account_directory
+       SET uid = ?,
+           full_name = ?,
+           provider = ?,
+           account_role = ?,
+           lang = ?,
+           discoverable = ?,
+           gdpr_consent = ?,
+           company_name = ?,
+           company_website = ?,
+           profile_json = ?,
+           cvs_count = ?,
+           tracked_apps_count = ?,
+           updated_at = ?
+       WHERE email = ?`
+    ).run(
+      nextUid,
+      nextName,
+      nextProvider,
+      nextRole,
+      nextLang,
+      nextDiscoverable,
+      nextGdpr,
+      nextCompany,
+      nextWebsite,
+      nextProfileJson,
+      nextCvsCount,
+      nextTrackedCount,
+      now,
+      email
+    );
+  }
+}
+
+export function getAccountModerationStatus(
+  uid: string,
+  email: string
+): {
+  blocked: boolean;
+  moderationStatus: UserModerationStatus;
+  moderationNote: string;
+} {
+  const cleanEmail = (email || '').trim().toLowerCase();
+  const cleanUid = (uid || '').trim();
+  if (cleanEmail === BOOTSTRAP_ADMIN_EMAIL) {
+    return { blocked: false, moderationStatus: 'approved', moderationNote: '' };
+  }
+  const db = getEngineDb();
+
+  // Check password auth_users first
+  const authRow = (
+    cleanUid
+      ? db
+          .prepare('SELECT moderation_status, moderation_note FROM auth_users WHERE uid = ? LIMIT 1')
+          .get(cleanUid)
+      : cleanEmail
+        ? db
+            .prepare(
+              'SELECT moderation_status, moderation_note FROM auth_users WHERE email = ? LIMIT 1'
+            )
+            .get(cleanEmail)
+        : undefined
+  ) as { moderation_status?: string; moderation_note?: string } | undefined;
+
+  if (authRow?.moderation_status === 'rejected' || authRow?.moderation_status === 'suspended') {
+    return {
+      blocked: true,
+      moderationStatus: authRow.moderation_status,
+      moderationNote: String(authRow.moderation_note || ''),
+    };
+  }
+
+  // Check unified account_directory (covers Google/Firebase accounts too)
+  const dirRow = (
+    cleanEmail
+      ? db
+          .prepare(
+            'SELECT moderation_status, moderation_note FROM account_directory WHERE email = ? LIMIT 1'
+          )
+          .get(cleanEmail)
+      : cleanUid
+        ? db
+            .prepare(
+              'SELECT moderation_status, moderation_note FROM account_directory WHERE uid = ? LIMIT 1'
+            )
+            .get(cleanUid)
+        : undefined
+  ) as { moderation_status?: string; moderation_note?: string } | undefined;
+
+  if (dirRow?.moderation_status === 'rejected' || dirRow?.moderation_status === 'suspended') {
+    return {
+      blocked: true,
+      moderationStatus: dirRow.moderation_status,
+      moderationNote: String(dirRow.moderation_note || ''),
+    };
+  }
+
+  const resolvedStatus = (dirRow?.moderation_status ||
+    authRow?.moderation_status ||
+    'approved') as UserModerationStatus;
+  const resolvedNote = String(dirRow?.moderation_note || authRow?.moderation_note || '');
+  return {
+    blocked: false,
+    moderationStatus: resolvedStatus,
+    moderationNote: resolvedNote,
+  };
+}
+
+export function moderateAccountDirectoryAdmin(params: {
+  uid?: string;
+  email?: string;
+  moderationStatus?: UserModerationStatus;
+  moderationNote?: string;
+  accountRole?: 'candidate' | 'recruiter';
+  isAdmin?: boolean;
+  moderatedBy: string;
+}): {
+  uid: string;
+  email: string;
+  fullName: string;
+  accountRole: 'candidate' | 'recruiter';
+  moderationStatus: UserModerationStatus;
+  moderationNote: string;
+  isAdmin: boolean;
+} | null {
+  const db = getEngineDb();
+  const cleanUid = clampStr(params.uid || '', 128);
+  const cleanEmail = clampStr(params.email || '', 200).toLowerCase();
+
+  let existing = (
+    cleanEmail
+      ? db.prepare('SELECT * FROM account_directory WHERE email = ? LIMIT 1').get(cleanEmail)
+      : cleanUid
+        ? db.prepare('SELECT * FROM account_directory WHERE uid = ? LIMIT 1').get(cleanUid)
+        : undefined
+  ) as Record<string, any> | undefined;
+
+  const resolvedEmail = cleanEmail || String(existing?.email || '').toLowerCase();
+  const resolvedUid = cleanUid || String(existing?.uid || '');
+  if (!resolvedEmail) return null;
+
+  const now = new Date().toISOString();
+  const isOwner = resolvedEmail === BOOTSTRAP_ADMIN_EMAIL;
+  const nextMod: UserModerationStatus = isOwner
+    ? 'approved'
+    : params.moderationStatus &&
+        ['approved', 'pending', 'rejected', 'suspended'].includes(params.moderationStatus)
+      ? params.moderationStatus
+      : ((existing?.moderation_status || 'approved') as UserModerationStatus);
+  const nextNote =
+    typeof params.moderationNote === 'string'
+      ? clampStr(params.moderationNote, 400)
+      : String(existing?.moderation_note || '');
+  const nextRole: 'candidate' | 'recruiter' =
+    params.accountRole === 'recruiter' || params.accountRole === 'candidate'
+      ? params.accountRole
+      : existing?.account_role === 'recruiter'
+        ? 'recruiter'
+        : 'candidate';
+
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO account_directory (
+        email, uid, full_name, provider, account_role, moderation_status, moderation_note,
+        moderated_by, moderated_at, lang, discoverable, gdpr_consent, company_name,
+        company_website, profile_json, cvs_count, tracked_apps_count, created_at, updated_at
+      ) VALUES (?, ?, ?, 'firebase', ?, ?, ?, ?, ?, 'fr', 0, 1, '', '', '{}', 0, 0, ?, ?)`
+    ).run(
+      resolvedEmail,
+      resolvedUid,
+      resolvedEmail.split('@')[0] || 'Membre',
+      nextRole,
+      nextMod,
+      nextNote,
+      clampStr(params.moderatedBy, 200),
+      now,
+      now,
+      now
+    );
+  } else {
+    db.prepare(
+      `UPDATE account_directory
+       SET uid = COALESCE(NULLIF(?, ''), uid),
+           account_role = ?,
+           moderation_status = ?,
+           moderation_note = ?,
+           moderated_by = ?,
+           moderated_at = ?,
+           updated_at = ?
+       WHERE email = ?`
+    ).run(
+      resolvedUid,
+      nextRole,
+      nextMod,
+      nextNote,
+      clampStr(params.moderatedBy, 200),
+      now,
+      now,
+      resolvedEmail
+    );
+  }
+
+  if (typeof params.isAdmin === 'boolean' && !isOwner) {
+    if (params.isAdmin) {
+      grantAdminRoleByEmail(resolvedEmail, params.moderatedBy, nextNote || 'Promu depuis Admin');
+    } else {
+      revokeAdminRoleByEmail(resolvedEmail);
+    }
+  }
+
+  existing = db
+    .prepare('SELECT * FROM account_directory WHERE email = ? LIMIT 1')
+    .get(resolvedEmail) as Record<string, any>;
+
+  const isNowAdmin =
+    isOwner ||
+    getConfiguredEnvAdminEmails().includes(resolvedEmail) ||
+    isEmailInAdminRoles(resolvedEmail);
+
+  return {
+    uid: String(existing.uid || resolvedUid),
+    email: resolvedEmail,
+    fullName: String(existing.full_name || ''),
+    accountRole: existing.account_role === 'recruiter' ? 'recruiter' : 'candidate',
+    moderationStatus: (existing.moderation_status || 'approved') as UserModerationStatus,
+    moderationNote: String(existing.moderation_note || ''),
+    isAdmin: isNowAdmin,
+  };
+}
+
+export function listAllPlatformUsersForAdmin(
+  search = '',
+  limit = 200
+): AdminPlatformUserSummary[] {
+  const db = getEngineDb();
+  const cappedLimit = Math.max(1, Math.min(500, Math.round(limit)));
+  const q = search.trim().toLowerCase();
+
+  const authRows = db
+    .prepare('SELECT * FROM auth_users ORDER BY created_at DESC LIMIT ?')
+    .all(cappedLimit) as Array<Record<string, any>>;
+
+  const dirRows = db
+    .prepare('SELECT * FROM account_directory ORDER BY updated_at DESC LIMIT ?')
+    .all(cappedLimit) as Array<Record<string, any>>;
+
+  const wsRows = db
+    .prepare('SELECT * FROM user_workspace_data')
+    .all() as Array<Record<string, any>>;
+  const wsMap = new Map<string, Record<string, any>>();
+  for (const r of wsRows) wsMap.set(String(r.uid), r);
+
+  const subCountRows = db
+    .prepare('SELECT user_id, COUNT(*) AS cnt FROM application_submissions GROUP BY user_id')
+    .all() as Array<{ user_id: string; cnt: number }>;
+  const subCountMap = new Map<string, number>();
+  for (const r of subCountRows) subCountMap.set(String(r.user_id), Number(r.cnt || 0));
+
+  const envAdmins = new Set(getConfiguredEnvAdminEmails());
+  const dbAdmins = new Set(
+    (
+      db.prepare('SELECT email FROM admin_roles').all() as Array<{ email: string }>
+    ).map((r) => String(r.email || '').toLowerCase())
+  );
+
+  const summaries: AdminPlatformUserSummary[] = [];
+  const seenUids = new Set<string>();
+  const seenEmails = new Set<string>();
+
+  for (const row of authRows) {
+    const user = mapAuthUserRow(row);
+    seenUids.add(user.uid);
+    seenEmails.add(user.email.toLowerCase());
+    const ws = wsMap.get(user.uid);
+    const profile = ws ? safeJsonParse<Record<string, any>>(ws.profile_json, {}) : {};
+    const cvs = ws ? safeJsonParse<Array<any>>(ws.cvs_json, []) : [];
+    const apps = ws ? safeJsonParse<Array<any>>(ws.applications_json, []) : [];
+    const watch = ws ? safeJsonParse<Array<any>>(ws.watchlist_json, []) : [];
+    const emailLower = user.email.toLowerCase();
+    const isAdmin =
+      emailLower === BOOTSTRAP_ADMIN_EMAIL ||
+      envAdmins.has(emailLower) ||
+      dbAdmins.has(emailLower) ||
+      user.isAdmin;
+
+    summaries.push({
+      uid: user.uid,
+      email: user.email,
+      fullName: user.fullName || String(profile?.fullName || ''),
+      provider: 'password',
+      emailVerified: user.emailVerified,
+      verifiedAt: user.verifiedAt,
+      accountRole: user.accountRole,
+      isAdmin,
+      moderationStatus: user.moderationStatus,
+      moderationNote: user.moderationNote,
+      moderatedBy: user.moderatedBy,
+      moderatedAt: user.moderatedAt,
+      lang: ws ? String(ws.lang || 'fr') : 'fr',
+      discoverable: ws ? Boolean(ws.discoverable) : false,
+      gdprConsent: ws ? ws.gdpr_consent !== 0 : true,
+      companyName: ws ? String(ws.company_name || '') : '',
+      companyWebsite: ws ? String(ws.company_website || '') : '',
+      currentTitle: String(profile?.currentTitle || ''),
+      originCountry: String(profile?.originCountry || ''),
+      preferredCountries: Array.isArray(profile?.preferredCountries)
+        ? profile.preferredCountries.slice(0, 10).map(String)
+        : [],
+      skills: Array.isArray(profile?.skills) ? profile.skills.slice(0, 15).map(String) : [],
+      languages: Array.isArray(profile?.languages)
+        ? profile.languages.slice(0, 10).map(String)
+        : [],
+      cvsCount: cvs.length,
+      trackedAppsCount: apps.length,
+      watchlistCount: watch.length,
+      submittedAppsCount: subCountMap.get(user.uid) || 0,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    });
+  }
+
+  // Merge Google / Firebase accounts mirrored into account_directory so ALL admins see them
+  for (const row of dirRows) {
+    const emailLower = String(row.email || '').toLowerCase();
+    const uid = String(row.uid || emailLower);
+    if (!emailLower || seenEmails.has(emailLower) || seenUids.has(uid)) continue;
+    seenEmails.add(emailLower);
+    if (uid) seenUids.add(uid);
+
+    const ws = wsMap.get(uid);
+    const dirProfile = safeJsonParse<Record<string, any>>(row.profile_json, {});
+    const wsProfile = ws ? safeJsonParse<Record<string, any>>(ws.profile_json, {}) : {};
+    const profile = Object.keys(wsProfile).length > 0 ? wsProfile : dirProfile;
+    const cvs = ws ? safeJsonParse<Array<any>>(ws.cvs_json, []) : [];
+    const apps = ws ? safeJsonParse<Array<any>>(ws.applications_json, []) : [];
+    const watch = ws ? safeJsonParse<Array<any>>(ws.watchlist_json, []) : [];
+    const isAdmin =
+      emailLower === BOOTSTRAP_ADMIN_EMAIL ||
+      envAdmins.has(emailLower) ||
+      dbAdmins.has(emailLower);
+    const rawMod = String(row.moderation_status || 'approved');
+    const moderationStatus: UserModerationStatus =
+      rawMod === 'pending' || rawMod === 'rejected' || rawMod === 'suspended'
+        ? rawMod
+        : 'approved';
+
+    summaries.push({
+      uid,
+      email: emailLower,
+      fullName: String(row.full_name || profile?.fullName || emailLower.split('@')[0] || 'Membre'),
+      provider: row.provider === 'password' ? 'password' : 'firebase',
+      emailVerified: true,
+      verifiedAt: null,
+      accountRole: row.account_role === 'recruiter' ? 'recruiter' : 'candidate',
+      isAdmin,
+      moderationStatus,
+      moderationNote: String(row.moderation_note || ''),
+      moderatedBy: String(row.moderated_by || ''),
+      moderatedAt: row.moderated_at ? String(row.moderated_at) : null,
+      lang: String(row.lang || (ws ? ws.lang : 'fr') || 'fr'),
+      discoverable: Boolean(row.discoverable || (ws ? ws.discoverable : 0)),
+      gdprConsent: row.gdpr_consent !== 0,
+      companyName: String(row.company_name || (ws ? ws.company_name : '') || ''),
+      companyWebsite: String(row.company_website || (ws ? ws.company_website : '') || ''),
+      currentTitle: String(profile?.currentTitle || ''),
+      originCountry: String(profile?.originCountry || ''),
+      preferredCountries: Array.isArray(profile?.preferredCountries)
+        ? profile.preferredCountries.slice(0, 10).map(String)
+        : [],
+      skills: Array.isArray(profile?.skills) ? profile.skills.slice(0, 15).map(String) : [],
+      languages: Array.isArray(profile?.languages)
+        ? profile.languages.slice(0, 10).map(String)
+        : [],
+      cvsCount: Math.max(cvs.length, Number(row.cvs_count || 0)),
+      trackedAppsCount: Math.max(apps.length, Number(row.tracked_apps_count || 0)),
+      watchlistCount: watch.length,
+      submittedAppsCount: subCountMap.get(uid) || 0,
+      createdAt: String(row.created_at || ''),
+      updatedAt: String(row.updated_at || ''),
+    });
+  }
+
+  // Also include legacy Firebase/Google users who interacted with server subscriptions
+  const subRows = db
+    .prepare('SELECT uid, email, profile_json, updated_at FROM candidate_subscriptions')
+    .all() as Array<Record<string, any>>;
+  for (const row of subRows) {
+    const uid = String(row.uid || '');
+    const email = String(row.email || '').toLowerCase();
+    if (!uid || seenUids.has(uid) || (email && seenEmails.has(email))) continue;
+    seenUids.add(uid);
+    if (email) seenEmails.add(email);
+    const profile = safeJsonParse<Record<string, any>>(row.profile_json, {});
+    const isAdmin =
+      email === BOOTSTRAP_ADMIN_EMAIL || envAdmins.has(email) || dbAdmins.has(email);
+    summaries.push({
+      uid,
+      email,
+      fullName: String(profile?.fullName || email.split('@')[0] || 'Utilisateur'),
+      provider: 'firebase',
+      emailVerified: true,
+      verifiedAt: null,
+      accountRole: 'candidate',
+      isAdmin,
+      moderationStatus: 'approved',
+      moderationNote: '',
+      moderatedBy: '',
+      moderatedAt: null,
+      lang: 'fr',
+      discoverable: false,
+      gdprConsent: true,
+      companyName: '',
+      companyWebsite: '',
+      currentTitle: String(profile?.currentTitle || ''),
+      originCountry: String(profile?.originCountry || ''),
+      preferredCountries: Array.isArray(profile?.preferredCountries)
+        ? profile.preferredCountries.slice(0, 10).map(String)
+        : [],
+      skills: Array.isArray(profile?.skills) ? profile.skills.slice(0, 15).map(String) : [],
+      languages: Array.isArray(profile?.languages)
+        ? profile.languages.slice(0, 10).map(String)
+        : [],
+      cvsCount: 0,
+      trackedAppsCount: 0,
+      watchlistCount: 0,
+      submittedAppsCount: subCountMap.get(uid) || 0,
+      createdAt: String(row.updated_at || ''),
+      updatedAt: String(row.updated_at || ''),
+    });
+  }
+
+  if (!q) return summaries;
+  return summaries.filter((u) =>
+    `${u.fullName} ${u.email} ${u.accountRole} ${u.companyName} ${u.currentTitle} ${u.originCountry} ${u.moderationStatus}`
+      .toLowerCase()
+      .includes(q)
+  );
+}
+
+export function getPlatformUserDossierForAdmin(uid: string): {
+  summary: AdminPlatformUserSummary;
+  profile: Record<string, any> | null;
+  cvs: Array<{
+    id: string;
+    versionName: string;
+    fullName: string;
+    headline: string;
+    location: string;
+    skillsCount: number;
+    updatedAt: string;
+  }>;
+  trackedApplications: Array<{
+    id: string;
+    company: string;
+    role: string;
+    stage: string;
+    type: string;
+    dateAdded: string;
+  }>;
+  submittedApplications: AdminSubmissionView[];
+  notificationsCount: number;
+} | null {
+  const cleanUid = uid.trim();
+  if (!cleanUid) return null;
+  const all = listAllPlatformUsersForAdmin('', 500);
+  const summary = all.find(
+    (u) => u.uid === cleanUid || u.email.toLowerCase() === cleanUid.toLowerCase()
+  );
+  if (!summary) return null;
+
+  const db = getEngineDb();
+  const ws = getUserWorkspaceData(summary.uid);
+  const dirRow = summary.email
+    ? (db
+        .prepare('SELECT profile_json FROM account_directory WHERE email = ? LIMIT 1')
+        .get(summary.email.toLowerCase()) as { profile_json?: string } | undefined)
+    : undefined;
+  const dirProfile = dirRow?.profile_json
+    ? safeJsonParse<Record<string, any>>(dirRow.profile_json, {})
+    : null;
+
+  const cvs = (ws?.cvs || []).map((c) => ({
+    id: String(c.id || ''),
+    versionName: String(c.versionName || 'CV'),
+    fullName: String(c.fullName || ''),
+    headline: String(c.headline || ''),
+    location: String(c.location || ''),
+    skillsCount: Array.isArray(c.skills) ? c.skills.length : 0,
+    updatedAt: String(c.updatedAt || ''),
+  }));
+  const trackedApplications = (ws?.applications || []).slice(0, 50).map((a) => ({
+    id: String(a.id || ''),
+    company: String(a.company || ''),
+    role: String(a.role || ''),
+    stage: String(a.stage || ''),
+    type: String(a.type || ''),
+    dateAdded: String(a.dateAdded || ''),
+  }));
+
+  const subRows = db
+    .prepare(
+      `SELECT * FROM application_submissions WHERE user_id = ? OR LOWER(candidate_email) = ? ORDER BY created_at DESC LIMIT 30`
+    )
+    .all(summary.uid, summary.email.toLowerCase()) as Array<Record<string, any>>;
+
+  const submittedApplications = subRows.map(mapAdminSubmissionRow);
+
+  const notifRow = db
+    .prepare('SELECT COUNT(*) AS cnt FROM notifications WHERE uid = ?')
+    .get(summary.uid) as { cnt?: number } | undefined;
+
+  return {
+    summary,
+    profile: ws?.profile || (dirProfile && Object.keys(dirProfile).length > 0 ? dirProfile : null),
+    cvs,
+    trackedApplications,
+    submittedApplications,
+    notificationsCount: Number(notifRow?.cnt || 0),
+  };
+}
+
+export function moderateAuthUserAdmin(
+  uid: string,
+  patch: {
+    moderationStatus?: UserModerationStatus;
+    moderationNote?: string;
+    emailVerified?: boolean;
+    accountRole?: 'candidate' | 'recruiter';
+    isAdmin?: boolean;
+    moderatedBy: string;
+  }
+): AuthUserRecord | null {
+  const existing = getAuthUserByUid(uid);
+  if (!existing) return null;
+
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  const nextMod: UserModerationStatus =
+    patch.moderationStatus &&
+    ['approved', 'pending', 'rejected', 'suspended'].includes(patch.moderationStatus)
+      ? patch.moderationStatus
+      : existing.moderationStatus;
+  const nextNote =
+    typeof patch.moderationNote === 'string'
+      ? clampStr(patch.moderationNote, 400)
+      : existing.moderationNote;
+  const nextVerified =
+    typeof patch.emailVerified === 'boolean' ? patch.emailVerified : existing.emailVerified;
+  const nextRole =
+    patch.accountRole === 'recruiter' || patch.accountRole === 'candidate'
+      ? patch.accountRole
+      : existing.accountRole;
+  const isOwner = existing.email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+  const nextIsAdmin = isOwner
+    ? true
+    : typeof patch.isAdmin === 'boolean'
+      ? patch.isAdmin
+      : existing.isAdmin;
+
+  db.prepare(
+    `UPDATE auth_users
+     SET moderation_status = ?,
+         moderation_note = ?,
+         moderated_by = ?,
+         moderated_at = ?,
+         email_verified = ?,
+         verified_at = CASE WHEN ? = 1 THEN COALESCE(verified_at, ?) ELSE verified_at END,
+         account_role = ?,
+         is_admin = ?,
+         updated_at = ?
+     WHERE uid = ?`
+  ).run(
+    nextMod,
+    nextNote,
+    clampStr(patch.moderatedBy, 200),
+    now,
+    nextVerified ? 1 : 0,
+    nextVerified ? 1 : 0,
+    now,
+    nextRole,
+    nextIsAdmin ? 1 : 0,
+    now,
+    uid
+  );
+
+  // Sync admin_roles table when isAdmin explicitly toggled
+  if (typeof patch.isAdmin === 'boolean' && !isOwner) {
+    if (patch.isAdmin) {
+      grantAdminRoleByEmail(existing.email, patch.moderatedBy, nextNote || 'Promu depuis le tableau Admin');
+    } else {
+      revokeAdminRoleByEmail(existing.email);
+    }
+  }
+
+  // Keep workspace role synced
+  db.prepare('UPDATE user_workspace_data SET account_role = ?, updated_at = ? WHERE uid = ?').run(
+    nextRole,
+    now,
+    uid
+  );
+
+  return getAuthUserByUid(uid);
+}
+
+function mapAdminSubmissionRow(row: Record<string, any>): AdminSubmissionView {
+  const attachments = safeJsonParse<Array<any>>(row.attachments_json, []);
+  const rawMod = String(row.admin_moderation_status || 'pending');
+  const adminModerationStatus: 'pending' | 'approved' | 'rejected' =
+    rawMod === 'approved' || rawMod === 'rejected' ? rawMod : 'pending';
+  return {
+    id: String(row.id),
+    userId: String(row.user_id || ''),
+    candidateName: String(row.candidate_name || ''),
+    candidateEmail: String(row.candidate_email || ''),
+    companyName: String(row.company_name || ''),
+    roleTitle: String(row.role_title || ''),
+    opportunityType: String(row.opportunity_type || 'published_job'),
+    channel: String(row.channel || ''),
+    recipientEmail: String(row.recipient_email || ''),
+    officialUrl: String(row.official_url || ''),
+    deliveryStatus: String(row.delivery_status || ''),
+    transmitted: Boolean(row.transmitted),
+    employerStatus: String(row.employer_status || 'received'),
+    attachmentsCount: attachments.length,
+    adminModerationStatus,
+    adminModerationNote: String(row.admin_moderation_note || ''),
+    adminModeratedBy: String(row.admin_moderated_by || ''),
+    adminModeratedAt: row.admin_moderated_at ? String(row.admin_moderated_at) : null,
+    createdAt: String(row.created_at || ''),
+  };
+}
+
+export function listAllSubmissionsForAdmin(limit = 100): AdminSubmissionView[] {
+  const db = getEngineDb();
+  const capped = Math.max(1, Math.min(300, Math.round(limit)));
+  const rows = db
+    .prepare('SELECT * FROM application_submissions ORDER BY created_at DESC LIMIT ?')
+    .all(capped) as Array<Record<string, any>>;
+  return rows.map(mapAdminSubmissionRow);
+}
+
+export function moderateSubmissionAdmin(
+  submissionId: string,
+  patch: {
+    status: 'pending' | 'approved' | 'rejected';
+    note?: string;
+    moderatedBy: string;
+  }
+): AdminSubmissionView | null {
+  const db = getEngineDb();
+  const existing = db
+    .prepare('SELECT * FROM application_submissions WHERE id = ? LIMIT 1')
+    .get(submissionId) as Record<string, any> | undefined;
+  if (!existing) return null;
+
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE application_submissions
+     SET admin_moderation_status = ?,
+         admin_moderation_note = ?,
+         admin_moderated_by = ?,
+         admin_moderated_at = ?,
+         updated_at = ?
+     WHERE id = ?`
+  ).run(
+    patch.status,
+    clampStr(patch.note || '', 400),
+    clampStr(patch.moderatedBy, 200),
+    now,
+    now,
+    submissionId
+  );
+
+  const updated = db
+    .prepare('SELECT * FROM application_submissions WHERE id = ? LIMIT 1')
+    .get(submissionId) as Record<string, any>;
+  return mapAdminSubmissionRow(updated);
+}
+
+// =============================================================================
+// DIRECT EMPLOYER JOB POSTINGS (UNIVERSAL: EMAIL/PASSWORD + GOOGLE ACCOUNTS)
+// =============================================================================
+export interface EmployerJobRecord {
+  id: string;
+  recruiterId: string;
+  companyName: string;
+  companyWebsite: string;
+  title: string;
+  country: string;
+  city: string;
+  workMode: 'Remote' | 'Hybrid' | 'On-site';
+  contractType: 'Full-time' | 'Part-time' | 'Contract' | 'Internship' | 'Freelance';
+  experienceLevel: string;
+  degreeRequired: string;
+  salaryRange: string;
+  skills: string[];
+  languages: string[];
+  description: string;
+  visaSponsorship: string;
+  status: 'open' | 'closed';
+  createdAt: string;
+}
+
+function mapEmployerJobRow(row: Record<string, any>): EmployerJobRecord {
+  let skills: string[] = [];
+  let languages: string[] = [];
+  try {
+    const parsedSkills = JSON.parse(String(row.skills_json || '[]'));
+    if (Array.isArray(parsedSkills)) skills = parsedSkills.map((s) => String(s)).filter(Boolean);
+  } catch {
+    skills = [];
+  }
+  try {
+    const parsedLangs = JSON.parse(String(row.languages_json || '[]'));
+    if (Array.isArray(parsedLangs)) languages = parsedLangs.map((s) => String(s)).filter(Boolean);
+  } catch {
+    languages = ['Français', 'Anglais'];
+  }
+  return {
+    id: String(row.id),
+    recruiterId: String(row.recruiter_id || ''),
+    companyName: String(row.company_name || ''),
+    companyWebsite: String(row.company_website || ''),
+    title: String(row.title || ''),
+    country: String(row.country || 'International'),
+    city: String(row.city || 'Remote'),
+    workMode:
+      row.work_mode === 'Remote' || row.work_mode === 'Hybrid' || row.work_mode === 'On-site'
+        ? row.work_mode
+        : 'Hybrid',
+    contractType:
+      row.contract_type === 'Full-time' ||
+      row.contract_type === 'Part-time' ||
+      row.contract_type === 'Contract' ||
+      row.contract_type === 'Internship' ||
+      row.contract_type === 'Freelance'
+        ? row.contract_type
+        : 'Full-time',
+    experienceLevel: String(row.experience_level || 'Mid-Senior'),
+    degreeRequired: String(row.degree_required || 'Non spécifié'),
+    salaryRange: String(row.salary_range || 'Non communiqué'),
+    skills,
+    languages,
+    description: String(row.description || ''),
+    visaSponsorship: String(row.visa_sponsorship || 'Case-by-case'),
+    status: row.status === 'closed' ? 'closed' : 'open',
+    createdAt: String(row.created_at || ''),
+  };
+}
+
+export function createEmployerJob(input: {
+  recruiterId: string;
+  companyName: string;
+  companyWebsite?: string;
+  title: string;
+  country?: string;
+  city?: string;
+  workMode?: 'Remote' | 'Hybrid' | 'On-site';
+  contractType?: 'Full-time' | 'Part-time' | 'Contract' | 'Internship' | 'Freelance';
+  experienceLevel?: string;
+  degreeRequired?: string;
+  salaryRange?: string;
+  skills?: string[];
+  languages?: string[];
+  description: string;
+  visaSponsorship?: string;
+}): EmployerJobRecord {
+  const db = getEngineDb();
+  const id = `empjob_${crypto.randomBytes(8).toString('hex')}`;
+  const now = new Date().toISOString();
+  const safeWebsite = input.companyWebsite ? sanitizeHttpUrl(input.companyWebsite) : '';
+  const skills = (input.skills || []).map((s) => clampStr(s, 60)).filter(Boolean).slice(0, 20);
+  const languages = (input.languages && input.languages.length > 0
+    ? input.languages
+    : ['Français', 'Anglais']
+  )
+    .map((s) => clampStr(s, 40))
+    .filter(Boolean)
+    .slice(0, 10);
+
+  db.prepare(
+    `INSERT INTO employer_jobs (
+      id, recruiter_id, company_name, company_website, title, country, city,
+      work_mode, contract_type, experience_level, degree_required, salary_range,
+      skills_json, languages_json, description, visa_sponsorship, status,
+      created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)`
+  ).run(
+    id,
+    clampStr(input.recruiterId, 128),
+    clampStr(input.companyName, 140),
+    safeWebsite,
+    clampStr(input.title, 180),
+    clampStr(input.country || 'International', 100),
+    clampStr(input.city || 'Remote', 100),
+    input.workMode || 'Hybrid',
+    input.contractType || 'Full-time',
+    clampStr(input.experienceLevel || 'Mid-Senior', 60),
+    clampStr(input.degreeRequired || 'Non spécifié', 80),
+    clampStr(input.salaryRange || 'Non communiqué', 100),
+    JSON.stringify(skills),
+    JSON.stringify(languages),
+    clampStr(input.description, 4000),
+    clampStr(input.visaSponsorship || 'Case-by-case', 80),
+    now,
+    now
+  );
+
+  const row = db.prepare('SELECT * FROM employer_jobs WHERE id = ? LIMIT 1').get(id) as Record<string, any>;
+  return mapEmployerJobRow(row);
+}
+
+export function listOpenEmployerJobs(limit = 100): EmployerJobRecord[] {
+  const db = getEngineDb();
+  const safeLimit = Math.min(200, Math.max(1, Math.floor(limit || 100)));
+  const rows = db
+    .prepare("SELECT * FROM employer_jobs WHERE status = 'open' ORDER BY created_at DESC LIMIT ?")
+    .all(safeLimit) as Array<Record<string, any>>;
+  return rows.map(mapEmployerJobRow);
+}
+
+export function closeEmployerJobByOwner(params: {
+  jobId: string;
+  actorUid: string;
+  isAdmin?: boolean;
+}): boolean {
+  const db = getEngineDb();
+  const existing = db
+    .prepare('SELECT id, recruiter_id FROM employer_jobs WHERE id = ? LIMIT 1')
+    .get(params.jobId) as { id: string; recruiter_id: string } | undefined;
+  if (!existing) return false;
+  if (!params.isAdmin && existing.recruiter_id !== params.actorUid) return false;
+  const now = new Date().toISOString();
+  db.prepare("UPDATE employer_jobs SET status = 'closed', updated_at = ? WHERE id = ?").run(
+    now,
+    params.jobId
+  );
+  return true;
+}
+
 
 

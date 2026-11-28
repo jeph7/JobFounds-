@@ -947,16 +947,29 @@ async function fetchMuseJobs(): Promise<NormalizedFeedJob[]> {
     return [];
   }
   recordSourceCall('themuse_api', true);
-  return data.results.slice(0, 25).map((item: any, idx: number) => {
-    const locName = String(item.locations?.[0]?.name || 'International');
+  return data.results.slice(0, 35).map((item: any, idx: number) => {
+    const locList: string[] = Array.isArray(item.locations)
+      ? item.locations.map((l: any) => String(l?.name || '').trim()).filter(Boolean)
+      : [];
+    const locName = locList[0] || 'Worldwide';
     const isRemote = /remote|flexible/i.test(locName);
     const parts = locName.split(',').map((s: string) => s.trim()).filter(Boolean);
-    const city = isRemote ? 'Remote' : parts[0] || 'Global';
-    const country = isRemote
-      ? 'Global / US & Europe'
-      : parts.length > 1
-        ? parts[parts.length - 1]
-        : 'United States / International';
+    const usStateAbbrev = /^[A-Z]{2}$/;
+    let city = isRemote ? 'Remote' : parts[0] || 'International';
+    let country = 'Worldwide';
+    if (isRemote) {
+      if (/\b(us|usa|united states)\b/i.test(locName)) country = 'United States';
+      else if (/\b(uk|united kingdom)\b/i.test(locName)) country = 'United Kingdom';
+      else if (/\b(canada)\b/i.test(locName)) country = 'Canada';
+      else if (/\b(europe|emea)\b/i.test(locName)) country = 'Europe';
+      else country = 'Worldwide';
+    } else if (parts.length >= 2) {
+      const lastPart = parts[parts.length - 1];
+      country = usStateAbbrev.test(lastPart) ? 'United States' : lastPart;
+    } else if (parts.length === 1) {
+      country = parts[0];
+      city = parts[0];
+    }
     const level = String(item.levels?.[0]?.name || 'Mid-level');
     const cats = Array.isArray(item.categories)
       ? item.categories.map((c: any) => String(c?.name || '')).filter(Boolean)
@@ -1218,7 +1231,7 @@ export async function fetchAggregatedLiveJobFeeds(filters: {
   });
 
   return {
-    jobs: scored.slice(0, 90).map((s) => s.job),
+    jobs: scored.slice(0, 160).map((s) => s.job),
     activeProviders,
     filteredOutCount,
   };

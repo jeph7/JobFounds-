@@ -516,16 +516,13 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
             <div className="lg:col-span-7 grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div className="p-5 rounded-2xl bg-jf-ice border border-jf-border space-y-3">
                 <div className="flex items-center justify-between text-xs font-semibold text-jf-navy">
-                  <span>{isFr ? 'Score ATS (exemple)' : 'ATS Score (example)'}</span>
-                  <span className="font-mono text-jf-blue tabular-nums">92 / 100</span>
+                  <span>{isFr ? 'Audit ATS sur votre vrai CV' : 'Live ATS Audit on Your Real CV'}</span>
+                  <span className="font-mono text-jf-blue">{isFr ? 'Analyse réelle' : 'Real audit'}</span>
                 </div>
-                <div className="h-2 rounded-full bg-white overflow-hidden">
-                  <div className="h-full w-[92%] bg-jf-blue rounded-full" />
-                </div>
-                <p className="text-xs text-slate-600">
+                <p className="text-xs text-slate-600 leading-relaxed">
                   {isFr
-                    ? 'Structure lisible, mots-clés techniques alignés et verbes d’action vérifiés.'
-                    : 'Clean parsing structure, aligned domain keywords, and verified impact bullets.'}
+                    ? 'Importez votre CV réel (PDF ou Word .docx) et une offre vérifiée : le score ATS et les mots-clés manquants sont calculés uniquement sur vos documents réels.'
+                    : 'Upload your actual PDF or Word (.docx) resume and a verified listing: ATS scoring and missing keywords are computed strictly from your real files.'}
                 </p>
               </div>
               <div className="p-5 rounded-2xl bg-jf-navy text-white space-y-3">
@@ -570,27 +567,27 @@ export function HiddenMarketShowcase({ lang, onNavigate }: ShowcaseProps) {
             </div>
             <div className="lg:col-span-7 p-5 rounded-2xl bg-jf-ice border border-jf-border space-y-3">
               <div className="text-xs font-semibold text-jf-blue">
-                {isFr ? 'Question IA (exemple)' : 'AI Question (example)'}
+                {isFr ? 'Axes d’évaluation réels (méthode STAR)' : 'Live Evaluation Dimensions (STAR)'}
               </div>
-              <p className="text-sm font-semibold text-jf-navy">
+              <p className="text-xs text-slate-600 leading-relaxed">
                 {isFr
-                  ? '« Décrivez une situation où vous avez dû arbitrer un projet critique avec des ressources limitées. »'
-                  : '“Describe a time you had to prioritize a critical project under tight constraints.”'}
+                  ? 'Les questions sont générées à partir du poste réel que vous sélectionnez. Aucune note n’est pré-remplie avant votre réponse.'
+                  : 'Questions are generated from the actual role you target. No scores are pre-filled before you submit your answer.'}
               </p>
-              <div className="grid grid-cols-3 gap-3 pt-2 text-center">
+              <div className="grid grid-cols-3 gap-3 pt-1 text-center">
                 <div className="p-3 bg-white rounded-xl border border-jf-border">
-                  <div className="font-mono text-base font-bold text-jf-navy tabular-nums">88%</div>
-                  <div className="text-[11px] text-slate-500">{isFr ? 'Clarté' : 'Clarity'}</div>
+                  <div className="text-xs font-semibold text-jf-navy">{isFr ? 'Clarté' : 'Clarity'}</div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">{isFr ? 'Structure & précision' : 'Structure & focus'}</div>
                 </div>
                 <div className="p-3 bg-white rounded-xl border border-jf-border">
-                  <div className="font-mono text-base font-bold text-jf-blue tabular-nums">84%</div>
-                  <div className="text-[11px] text-slate-500">STAR</div>
+                  <div className="text-xs font-semibold text-jf-blue">STAR</div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">{isFr ? 'Situation → Résultat' : 'Situation → Result'}</div>
                 </div>
                 <div className="p-3 bg-white rounded-xl border border-jf-border">
-                  <div className="font-mono text-base font-bold text-jf-navy tabular-nums">91%</div>
-                  <div className="text-[11px] text-slate-500">
+                  <div className="text-xs font-semibold text-jf-navy">
                     {isFr ? 'Pertinence' : 'Relevance'}
                   </div>
+                  <div className="text-[11px] text-slate-500 mt-0.5">{isFr ? 'Alignement poste' : 'Role alignment'}</div>
                 </div>
               </div>
             </div>

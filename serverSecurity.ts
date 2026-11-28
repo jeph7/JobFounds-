@@ -315,9 +315,59 @@ export function sanitizeHttpUrl(rawUrl: unknown): string {
 
 export const BOOTSTRAP_ADMIN_EMAIL = 'guerrierjephly@gmail.com';
 
+type AdminEmailChecker = (email: string) => boolean;
+let registeredAdminEmailChecker: AdminEmailChecker | null = null;
+
+export function registerAdminEmailChecker(fn: AdminEmailChecker): void {
+  registeredAdminEmailChecker = fn;
+}
+
+export interface AccountModerationCheckResult {
+  blocked: boolean;
+  moderationStatus: 'approved' | 'pending' | 'rejected' | 'suspended';
+  moderationNote: string;
+}
+
+type UserModerationChecker = (uid: string, email: string) => AccountModerationCheckResult;
+let registeredUserModerationChecker: UserModerationChecker | null = null;
+
+export function registerUserModerationChecker(fn: UserModerationChecker): void {
+  registeredUserModerationChecker = fn;
+}
+
+export function checkAccountModeration(
+  user?: Pick<VerifiedAuthUser, 'uid' | 'email'> | null
+): AccountModerationCheckResult {
+  if (!user) {
+    return { blocked: false, moderationStatus: 'approved', moderationNote: '' };
+  }
+  const email = (user.email || '').trim().toLowerCase();
+  if (email === BOOTSTRAP_ADMIN_EMAIL) {
+    return { blocked: false, moderationStatus: 'approved', moderationNote: '' };
+  }
+  if (registeredUserModerationChecker) {
+    return registeredUserModerationChecker(user.uid, email);
+  }
+  return { blocked: false, moderationStatus: 'approved', moderationNote: '' };
+}
+
+export function getConfiguredEnvAdminEmails(): string[] {
+  const raw = String(process.env.ADMIN_EMAILS || '').trim();
+  if (!raw) return [];
+  return raw
+    .split(/[,;\s]+/)
+    .map((e) => e.trim().toLowerCase())
+    .filter((e) => e.includes('@'));
+}
+
 export function isAdminAuthUser(user?: VerifiedAuthUser | null): boolean {
   if (!user || !user.uid || !user.emailVerified) return false;
-  return user.email.trim().toLowerCase() === BOOTSTRAP_ADMIN_EMAIL;
+  const email = user.email.trim().toLowerCase();
+  if (!email) return false;
+  if (email === BOOTSTRAP_ADMIN_EMAIL) return true;
+  if (getConfiguredEnvAdminEmails().includes(email)) return true;
+  if (registeredAdminEmailChecker && registeredAdminEmailChecker(email)) return true;
+  return false;
 }
 
 export function extractClientIp(req: Request): string {
@@ -349,6 +399,19 @@ export function requireFirebaseAuth(
       error:
         'Votre adresse e-mail n’est pas encore confirmée. Saisissez le code à 5 chiffres reçu par e-mail pour activer votre compte.',
       code: 'EMAIL_NOT_VERIFIED',
+    });
+    return;
+  }
+  const mod = checkAccountModeration(req.authUser);
+  if (mod.blocked) {
+    res.status(403).json({
+      code: 'ACCOUNT_MODERATED',
+      moderationStatus: mod.moderationStatus,
+      moderationNote: mod.moderationNote,
+      error:
+        mod.moderationStatus === 'suspended'
+          ? `Votre compte a été suspendu par un administrateur.${mod.moderationNote ? ` Motif : ${mod.moderationNote}` : ''}`
+          : `Votre compte a été refusé par un administrateur.${mod.moderationNote ? ` Motif : ${mod.moderationNote}` : ''}`,
     });
     return;
   }

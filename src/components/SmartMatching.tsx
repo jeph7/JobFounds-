@@ -371,6 +371,18 @@ export function SmartMatching({
             </label>
             <label className="block space-y-1">
               <span className="text-xs font-medium text-slate-600">
+                {lang === 'fr' ? 'Pays de résidence actuel' : 'Current Country'}
+              </span>
+              <input
+                type="text"
+                value={draft.originCountry || ''}
+                onChange={(e) => setDraft({ ...draft, originCountry: e.target.value })}
+                placeholder={lang === 'fr' ? 'Ex. Haïti, France, Canada…' : 'e.g. Haiti, France, Canada…'}
+                className="w-full px-3 py-2 text-sm border border-jf-border rounded-lg"
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-slate-600">
                 {lang === 'fr' ? 'Pays souhaités' : 'Preferred Countries'}
               </span>
               <input
@@ -385,6 +397,26 @@ export function SmartMatching({
                       .filter(Boolean),
                   })
                 }
+                className="w-full px-3 py-2 text-sm border border-jf-border rounded-lg"
+              />
+            </label>
+            <label className="block space-y-1">
+              <span className="text-xs font-medium text-slate-600">
+                {lang === 'fr' ? 'Villes souhaitées (virgules)' : 'Preferred Cities (comma-separated)'}
+              </span>
+              <input
+                type="text"
+                value={(draft.preferredCities || []).join(', ')}
+                onChange={(e) =>
+                  setDraft({
+                    ...draft,
+                    preferredCities: e.target.value
+                      .split(',')
+                      .map((s) => s.trim())
+                      .filter(Boolean),
+                  })
+                }
+                placeholder={lang === 'fr' ? 'Ex. Montréal, Paris, Dakar…' : 'e.g. Montreal, Paris, Dakar…'}
                 className="w-full px-3 py-2 text-sm border border-jf-border rounded-lg"
               />
             </label>
@@ -642,35 +674,32 @@ export function SmartMatching({
 
                         <p className="text-xs text-slate-700 leading-relaxed">{item.explanation}</p>
 
-                        {/* 9-Dimension Breakdown */}
+                        {/* Exact 9-Criteria Official Breakdown */}
                         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 text-[11px] font-mono tabular-nums">
                           {[
-                            [lang === 'fr' ? 'Compétences' : 'Skills', item.breakdown.skills],
-                            [lang === 'fr' ? 'Expérience' : 'Exp.', item.breakdown.experience],
+                            [lang === 'fr' ? '1. Compétences' : '1. Skills', item.breakdown.skills],
+                            [lang === 'fr' ? '2. Expérience' : '2. Experience', item.breakdown.experience],
+                            [lang === 'fr' ? '3. Formation' : '3. Education', item.breakdown.education],
+                            [lang === 'fr' ? '4. Langues' : '4. Languages', item.breakdown.languages],
                             [
-                              lang === 'fr' ? 'Formation' : 'Education',
-                              item.breakdown.education ?? item.breakdown.experience,
-                            ],
-                            [lang === 'fr' ? 'Langues' : 'Lang.', item.breakdown.languages],
-                            [
-                              lang === 'fr' ? 'Localisation' : 'Location',
+                              lang === 'fr' ? '5. Localisation' : '5. Location & Mobility',
                               item.breakdown.locationAndMobility,
                             ],
                             [
-                              lang === 'fr' ? 'Visa / Droit' : 'Work Auth',
-                              item.breakdown.workAuthorization ?? 70,
+                              lang === 'fr' ? '6. Autorisation / Visa' : '6. Work Auth & Visa',
+                              item.breakdown.workAuthorization,
                             ],
                             [
-                              lang === 'fr' ? 'Disponibilité' : 'Availability',
-                              item.breakdown.availability ?? 75,
+                              lang === 'fr' ? '7. Disponibilité' : '7. Availability',
+                              item.breakdown.availability,
                             ],
                             [
-                              lang === 'fr' ? 'Salaire' : 'Salary',
-                              item.breakdown.salary ?? 70,
+                              lang === 'fr' ? '8. Salaire' : '8. Salary',
+                              item.breakdown.salary,
                             ],
                             [
-                              lang === 'fr' ? 'Fiabilité source' : 'Source Reliability',
-                              item.breakdown.signalReliability ?? item.breakdown.sectorAndRole,
+                              lang === 'fr' ? '9. Fiabilité source' : '9. Source Reliability',
+                              item.breakdown.sourceReliability ?? item.breakdown.signalReliability ?? 0,
                             ],
                           ].map(([lbl, val]) => (
                             <div
@@ -995,15 +1024,15 @@ export function SmartMatching({
                             </div>
                             <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5 text-[10px] font-mono tabular-nums">
                               {[
-                                [lang === 'fr' ? 'Compétences' : 'Skills', bd.skills],
-                                [lang === 'fr' ? 'Expérience' : 'Exp.', bd.experience],
-                                [lang === 'fr' ? 'Formation' : 'Educ.', bd.education],
-                                [lang === 'fr' ? 'Langues' : 'Lang.', bd.languages],
-                                [lang === 'fr' ? 'Localisation' : 'Loc.', bd.locationAndMobility],
-                                [lang === 'fr' ? 'Visa / Droit' : 'Visa', bd.workAuthorization],
-                                [lang === 'fr' ? 'Disponibilité' : 'Avail.', bd.availability],
-                                [lang === 'fr' ? 'Salaire' : 'Salary', bd.salary],
-                                [lang === 'fr' ? 'Fiabilité' : 'Source', bd.sourceReliability],
+                                [lang === 'fr' ? '1. Compétences' : '1. Skills', bd.skills],
+                                [lang === 'fr' ? '2. Expérience' : '2. Experience', bd.experience],
+                                [lang === 'fr' ? '3. Formation' : '3. Education', bd.education],
+                                [lang === 'fr' ? '4. Langues' : '4. Languages', bd.languages],
+                                [lang === 'fr' ? '5. Localisation' : '5. Location', bd.locationAndMobility],
+                                [lang === 'fr' ? '6. Visa / Droit' : '6. Work Auth', bd.workAuthorization],
+                                [lang === 'fr' ? '7. Disponibilité' : '7. Availability', bd.availability],
+                                [lang === 'fr' ? '8. Salaire' : '8. Salary', bd.salary],
+                                [lang === 'fr' ? '9. Fiabilité source' : '9. Source', bd.sourceReliability],
                               ].map(([lbl, val]) => (
                                 <span
                                   key={String(lbl)}

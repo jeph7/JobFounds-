@@ -670,13 +670,14 @@ export interface IntelligenceMatchItem {
   breakdown: {
     skills: number;
     experience: number;
-    education?: number;
+    education: number;
     languages: number;
     locationAndMobility: number;
-    workAuthorization?: number;
-    availability?: number;
-    salary?: number;
-    sectorAndRole: number;
+    workAuthorization: number;
+    availability: number;
+    salary: number;
+    sourceReliability: number;
+    sectorAndRole?: number;
     signalReliability?: number;
   };
   matchedSkills: string[];

@@ -30,6 +30,8 @@ import {
   WorkMode,
 } from '../types';
 import {
+  closeServerEmployerJob,
+  createServerEmployerJob,
   downloadSubmissionAttachment,
   fetchEmployerApplications,
   findRecruiters,
@@ -48,6 +50,7 @@ import { VerificationStatusText } from './StatusText';
 interface RecruiterHubProps {
   lang: Lang;
   uid: string | null;
+  googleSignedIn?: boolean;
   userDisplayName: string;
   accountRole: AccountRole;
   companyNameDefault: string;
@@ -55,6 +58,7 @@ interface RecruiterHubProps {
   companyJobs: CompanyJobDoc[];
   publicCandidates: PublicCandidateDoc[];
   conversations: ConversationDoc[];
+  onRefreshEmployerJobs?: () => void;
   onRequireSignIn: () => void;
   onNotify: (msg: string) => void;
 }
@@ -62,6 +66,7 @@ interface RecruiterHubProps {
 export function RecruiterHub({
   lang,
   uid,
+  googleSignedIn = false,
   userDisplayName,
   accountRole,
   companyNameDefault,
@@ -69,6 +74,7 @@ export function RecruiterHub({
   companyJobs,
   publicCandidates,
   conversations,
+  onRefreshEmployerJobs,
   onRequireSignIn,
   onNotify,
 }: RecruiterHubProps) {
@@ -226,25 +232,32 @@ export function RecruiterHub({
     if (!jobTitle.trim() || !jobCompany.trim() || !jobDesc.trim()) return;
     setPublishing(true);
     try {
-      await publishCompanyJob(uid, {
-        companyName: jobCompany,
-        companyWebsite: jobWebsite,
-        title: jobTitle,
+      const payload = {
+        companyName: jobCompany.trim(),
+        companyWebsite: jobWebsite.trim(),
+        title: jobTitle.trim(),
         country: jobCountry.trim() || 'International',
         city: jobCity.trim() || 'Remote',
         workMode: jobWorkMode,
         contractType: jobContract,
-        salaryRange: jobSalary || 'Non communiqué',
+        salaryRange: jobSalary.trim() || 'Non communiqué',
         skills: jobSkills
           .split(',')
           .map((s) => s.trim())
           .filter(Boolean),
         languages: ['Français', 'Anglais'],
-        description: jobDesc,
+        description: jobDesc.trim(),
         experienceLevel: 'Mid-Senior',
         degreeRequired: 'Non spécifié',
         visaSponsorship: 'Case-by-case',
-      });
+      };
+      // Universal SQLite persistence (works for both Email/Password AND Google employers)
+      await createServerEmployerJob(payload);
+      // Optional Firestore mirror when signed in with Google
+      if (googleSignedIn) {
+        publishCompanyJob(uid, payload).catch(() => {});
+      }
+      onRefreshEmployerJobs?.();
       setJobTitle('');
       setJobDesc('');
       setJobSalary('');
@@ -254,8 +267,41 @@ export function RecruiterHub({
           ? 'Offre entreprise publiée et synchronisée dans la recherche mondiale.'
           : 'Employer job posted and synced to Global Job Search.'
       );
+    } catch (err) {
+      onNotify(
+        err instanceof Error
+          ? err.message
+          : lang === 'fr'
+            ? 'Impossible de publier l’offre.'
+            : 'Unable to publish employer job.'
+      );
     } finally {
       setPublishing(false);
+    }
+  };
+
+  const handleCloseJob = async (job: CompanyJobDoc) => {
+    if (!uid) return;
+    try {
+      if (job.id.startsWith('empjob_')) {
+        await closeServerEmployerJob(job.id);
+      } else if (googleSignedIn) {
+        await closeCompanyJob(job.id);
+      } else {
+        await closeServerEmployerJob(job.id);
+      }
+      onRefreshEmployerJobs?.();
+      onNotify(
+        lang === 'fr' ? 'Offre clôturée avec succès.' : 'Job posting closed successfully.'
+      );
+    } catch (err) {
+      onNotify(
+        err instanceof Error
+          ? err.message
+          : lang === 'fr'
+            ? 'Impossible de clôturer cette offre.'
+            : 'Unable to close this job.'
+      );
     }
   };
 
@@ -608,11 +654,11 @@ export function RecruiterHub({
               <p className="text-xs text-slate-500">
                 {uid
                   ? lang === 'fr'
-                    ? `Connecté en mode ${accountRole === 'recruiter' ? 'Recruteur' : 'Candidat (publication autorisée)'}. Les offres ouvertes apparaissent immédiatement dans la recherche mondiale.`
-                    : `Signed in (${accountRole}). Open roles appear live in Global Job Search.`
+                    ? `Connecté en mode ${accountRole === 'recruiter' ? 'Recruteur' : 'Candidat (publication autorisée)'}. Les offres ouvertes apparaissent immédiatement dans la recherche mondiale (compte E-mail ou Google).`
+                    : `Signed in (${accountRole}). Open roles appear live in Global Job Search (Email or Google account).`
                   : lang === 'fr'
-                    ? 'Connectez-vous avec Google pour publier une offre dans Firestore.'
-                    : 'Sign in with Google to publish live roles to Firestore.'}
+                    ? 'Connectez-vous (E-mail vérifié ou Google) pour publier une offre entreprise.'
+                    : 'Sign in (verified Email or Google) to publish live employer roles.'}
               </p>
             </div>
 
@@ -752,7 +798,7 @@ export function RecruiterHub({
                         {uid && job.recruiterId === uid ? (
                           <button
                             type="button"
-                            onClick={() => closeCompanyJob(job.id)}
+                            onClick={() => void handleCloseJob(job)}
                             className="px-3 py-1.5 text-xs font-medium text-jf-navy bg-jf-soft hover:bg-jf-sky/70 border border-jf-sky rounded-lg inline-flex items-center gap-1"
                           >
                             <XCircle className="w-3.5 h-3.5" />

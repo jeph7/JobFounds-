@@ -6,7 +6,9 @@ import {
   type CareerJobRecord,
   type CompanyRecord,
   type CompanySignalRecord,
+  closeEmployerJobByOwner,
   confirmPortalSubmission,
+  createEmployerJob,
   createEngineDbBackup,
   createNotification,
   enqueueBackgroundJob,
@@ -26,6 +28,7 @@ import {
   listEmployerReceivedApplications,
   listEngineDbBackups,
   listHrContacts,
+  listOpenEmployerJobs,
   listSignals,
   listUserApplicationSubmissions,
   listUserNotifications,
@@ -179,6 +182,7 @@ export function serializeMatchItem(m: IntelligenceMatchItem) {
       workAuthorization: m.breakdown.workAuthorizationScore,
       availability: m.breakdown.availabilityScore,
       salary: m.breakdown.salaryScore,
+      sourceReliability: m.breakdown.signalReliabilityScore,
       sectorAndRole: m.breakdown.experienceRoleScore,
       signalReliability: m.breakdown.signalReliabilityScore,
     },
@@ -1326,6 +1330,94 @@ export function createIntelligenceRouter() {
         ipAddress: extractClientIp(req),
       });
       res.json({ submission: updated });
+    }
+  );
+
+  // ===========================================================================
+  // EMPLOYER DIRECT JOB POSTINGS (UNIVERSAL: EMAIL/PASSWORD + GOOGLE ACCOUNTS)
+  // ===========================================================================
+  const CreateEmployerJobSchema = z.object({
+    companyName: z.string().trim().min(2).max(140),
+    companyWebsite: z.string().trim().max(260).optional().default(''),
+    title: z.string().trim().min(2).max(180),
+    country: z.string().trim().max(100).optional().default('International'),
+    city: z.string().trim().max(100).optional().default('Remote'),
+    workMode: z.enum(['Remote', 'Hybrid', 'On-site']).optional().default('Hybrid'),
+    contractType: z
+      .enum(['Full-time', 'Part-time', 'Contract', 'Internship', 'Freelance'])
+      .optional()
+      .default('Full-time'),
+    experienceLevel: z.string().trim().max(60).optional().default('Mid-Senior'),
+    degreeRequired: z.string().trim().max(80).optional().default('Non spécifié'),
+    salaryRange: z.string().trim().max(100).optional().default('Non communiqué'),
+    skills: z.array(z.string().trim().max(60)).max(20).optional().default([]),
+    languages: z.array(z.string().trim().max(40)).max(10).optional().default(['Français', 'Anglais']),
+    description: z.string().trim().min(10).max(4000),
+    visaSponsorship: z.string().trim().max(80).optional().default('Case-by-case'),
+  });
+
+  router.get('/employer/jobs', standardLimiter, (req, res) => {
+    const jobs = listOpenEmployerJobs(Number(req.query.limit) || 100);
+    res.json({ jobs });
+  });
+
+  router.post(
+    '/employer/jobs',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const parsed = CreateEmployerJobSchema.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        res.status(400).json({
+          error: 'Veuillez renseigner l’entreprise, le titre et une description complète (min. 10 caractères).',
+          details: parsed.error.flatten(),
+        });
+        return;
+      }
+      const job = createEmployerJob({
+        recruiterId: req.authUser!.uid,
+        ...parsed.data,
+      });
+      writeAuditLog({
+        actorUid: req.authUser!.uid,
+        actorEmail: req.authUser!.email,
+        actorRole: isAdminAuthUser(req.authUser) ? 'admin' : 'user',
+        action: 'employer_job_published',
+        targetType: 'employer_job',
+        targetId: job.id,
+        details: { companyName: job.companyName, title: job.title, country: job.country },
+        ipAddress: extractClientIp(req),
+      });
+      res.status(201).json({ job });
+    }
+  );
+
+  router.post(
+    '/employer/jobs/:id/close',
+    requireFirebaseAuth,
+    standardLimiter,
+    (req: AuthedRequest, res) => {
+      const jobId = String(req.params.id || '').trim();
+      const closed = closeEmployerJobByOwner({
+        jobId,
+        actorUid: req.authUser!.uid,
+        isAdmin: isAdminAuthUser(req.authUser),
+      });
+      if (!closed) {
+        res.status(404).json({ error: 'Offre introuvable ou autorisation refusée.' });
+        return;
+      }
+      writeAuditLog({
+        actorUid: req.authUser!.uid,
+        actorEmail: req.authUser!.email,
+        actorRole: isAdminAuthUser(req.authUser) ? 'admin' : 'user',
+        action: 'employer_job_closed',
+        targetType: 'employer_job',
+        targetId: jobId,
+        details: {},
+        ipAddress: extractClientIp(req),
+      });
+      res.json({ ok: true, id: jobId });
     }
   );
 

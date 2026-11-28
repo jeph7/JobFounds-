@@ -4,9 +4,11 @@ import http from 'node:http';
 import express from 'express';
 import {
   attachFirebaseAuth,
+  BOOTSTRAP_ADMIN_EMAIL,
   clampStr,
   isSafePublicHttpUrl,
   registerAppTokenVerifier,
+  registerUserModerationChecker,
   requireFirebaseAuth,
   sanitizeHttpUrl,
 } from '../serverSecurity.ts';
@@ -18,12 +20,14 @@ import {
   deleteAuthUserByUid,
   detectAtsFromCareersUrl,
   enqueueBackgroundJob,
+  getAccountModerationStatus,
   getAuthUserByEmail,
   getCompanyById,
   getEngineDb,
   getEngineOverviewMetrics,
   getLatestActiveVerificationCode,
   getSubmissionAttachmentForActor,
+  grantAdminRoleByEmail,
   isSourceEnabled,
   listAuditLogs,
   listCompanyCareerChanges,
@@ -33,14 +37,17 @@ import {
   listEngineDbBackups,
   listUserApplicationSubmissions,
   listUserNotifications,
+  markAuthUserEmailVerified,
   mergeCompanies,
   recordCompanySignal,
   recordCrmEmailSyncEvent,
   respondToEmployerApplication,
+  revokeAdminRoleByEmail,
   setSourceEnabled,
   upsertCandidateSubscription,
   upsertCompany,
   upsertHrContact,
+  upsertUserWorkspaceData,
   writeAuditLog,
 } from '../serverEngineDb.ts';
 import {
@@ -53,6 +60,7 @@ import {
   verifyFiveDigitCodeForUser,
   verifyPasswordCredentials,
 } from '../serverAuthEngine.ts';
+import { createIntelligenceRouter } from '../serverIntelligenceRoutes.ts';
 import { monitorCompanyCareerPage } from '../serverCareerMonitor.ts';
 import {
   checkLiveJobAvailability,
@@ -606,6 +614,7 @@ async function runTests() {
         'workAuthorization',
         'availability',
         'salary',
+        'sourceReliability',
         'signalReliability',
       ] as const) {
         assert.equal(
@@ -614,6 +623,7 @@ async function runTests() {
           `Expected numeric 9-criteria breakdown.${dimKey}`
         );
       }
+      assert.equal(serialized.breakdown.sourceReliability, serialized.breakdown.signalReliability);
 
       // ATS merge inside live feeds
       const feedResult = await fetchAggregatedLiveJobFeeds({ query: '', country: '' });
@@ -1538,6 +1548,733 @@ async function runTests() {
         for (const uid of createdUids) {
           deleteAuthUserByUid(uid);
         }
+      }
+    });
+
+    // 26. Dynamic Admin Promotion, Full User Dossiers & Account/Submission Moderation (Valider / Refuser / Suspendre)
+    await check('Admin role promotion, full user dossier visibility (zero credential leak), account moderation & submission approval/rejection', async () => {
+      // 26a. Probe live server /api/admin/users requires auth (401)
+      const liveAdminUsers = await fetch('http://127.0.0.1:3000/api/admin/users');
+      assert.equal(liveAdminUsers.status, 401, 'Live /api/admin/users must reject unauthenticated requests');
+
+      // 26b. Isolated Express app with exact auth + admin router
+      registerAppTokenVerifier(verifyAppSessionToken);
+      const adminApp = express();
+      adminApp.use(express.json());
+      adminApp.use('/api', attachFirebaseAuth);
+      adminApp.use('/api', createAuthRouter());
+
+      const srv = await new Promise<http.Server>((resolve) => {
+        const s = adminApp.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const addr = srv.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+      const createdUids: string[] = [];
+      const createdAdminEmails: string[] = [];
+      const createdSubIds: string[] = [];
+      const ts = Date.now();
+      const seedAdminEmail = `seed-admin-${ts}@jobfounds-test.invalid`;
+      const promotedEmail = `new-admin-${ts}@jobfounds-test.invalid`;
+      const memberEmail = `member-${ts}@jobfounds-test.invalid`;
+      const testPwd = 'AdminTestPass#2026';
+
+      try {
+        const creds = createPasswordCredentials(testPwd);
+        const seedAdmin = markAuthUserEmailVerified(
+          createAuthUserRecord({
+            email: seedAdminEmail,
+            fullName: 'Seed Admin',
+            passwordHash: creds.passwordHash,
+            passwordSalt: creds.passwordSalt,
+          }).uid
+        )!;
+        createdUids.push(seedAdmin.uid);
+        grantAdminRoleByEmail(seedAdminEmail, BOOTSTRAP_ADMIN_EMAIL, 'Test seed admin');
+        createdAdminEmails.push(seedAdminEmail);
+
+        const newAdminUser = markAuthUserEmailVerified(
+          createAuthUserRecord({
+            email: promotedEmail,
+            fullName: 'Nouveau Compte Admin',
+            passwordHash: creds.passwordHash,
+            passwordSalt: creds.passwordSalt,
+          }).uid
+        )!;
+        createdUids.push(newAdminUser.uid);
+
+        // Regular unverified member with workspace profile & CVs
+        const memberUser = createAuthUserRecord({
+          email: memberEmail,
+          fullName: 'Membre Standard',
+          passwordHash: creds.passwordHash,
+          passwordSalt: creds.passwordSalt,
+        });
+        createdUids.push(memberUser.uid);
+        upsertUserWorkspaceData(memberUser.uid, {
+          profile: {
+            fullName: 'Membre Standard',
+            currentTitle: 'Data Analyst',
+            originCountry: 'Haïti',
+            preferredCountries: ['Canada', 'France'],
+            skills: ['SQL', 'Python'],
+            languages: ['Français', 'Anglais'],
+          },
+          cvs: [
+            {
+              id: 'cv_1',
+              versionName: 'CV Data',
+              fullName: 'Membre Standard',
+              headline: 'Data Analyst',
+              skills: ['SQL', 'Python'],
+              updatedAt: '2026-11-28',
+            },
+          ],
+          applications: [
+            {
+              id: 'crm_1',
+              company: 'Acme Global',
+              role: 'Data Analyst',
+              stage: 'Application Prepared',
+              type: 'Confirmed Job',
+              dateAdded: '2026-11-28',
+            },
+          ],
+        });
+
+        const seedToken = issueAppSessionToken(seedAdmin);
+        const promotedToken = issueAppSessionToken(newAdminUser);
+
+        // Before promotion, newAdminUser MUST receive 403 on /api/admin/users
+        const deniedRes = await fetch(`${baseUrl}/api/admin/users`, {
+          headers: { Authorization: `Bearer ${promotedToken}` },
+        });
+        assert.equal(deniedRes.status, 403, 'Non-admin user must receive 403 on /api/admin/users');
+
+        // Seed admin promotes newAdminUser via POST /api/admin/admins/grant
+        const grantRes = await fetch(`${baseUrl}/api/admin/admins/grant`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${seedToken}`,
+          },
+          body: JSON.stringify({ email: promotedEmail, note: 'Co-administrateur' }),
+        });
+        assert.equal(grantRes.status, 201);
+        createdAdminEmails.push(promotedEmail);
+
+        // Promoted account now sees isAdmin=true on /api/auth/me
+        const meRes = await fetch(`${baseUrl}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${promotedToken}` },
+        });
+        assert.equal(meRes.status, 200);
+        const meBody = (await meRes.json()) as { user?: { isAdmin?: boolean } };
+        assert.equal(meBody.user?.isAdmin, true, 'Promoted account must immediately have isAdmin=true');
+
+        // Promoted admin can list all users & view complete dossier without leaking passwordHash/passwordSalt
+        const listRes = await fetch(`${baseUrl}/api/admin/users`, {
+          headers: { Authorization: `Bearer ${promotedToken}` },
+        });
+        assert.equal(listRes.status, 200);
+        const listText = await listRes.text();
+        assert.ok(!listText.includes('passwordHash') && !listText.includes('passwordSalt'), 'Password secrets must NEVER leak');
+        const listBody = JSON.parse(listText) as { users: Array<{ uid: string; email: string }> };
+        assert.ok(listBody.users.some((u) => u.uid === memberUser.uid), 'Member must appear in admin user directory');
+
+        const dossierRes = await fetch(`${baseUrl}/api/admin/users/${encodeURIComponent(memberUser.uid)}`, {
+          headers: { Authorization: `Bearer ${promotedToken}` },
+        });
+        assert.equal(dossierRes.status, 200);
+        const dossierBody = (await dossierRes.json()) as {
+          dossier: {
+            summary: { originCountry: string; cvsCount: number };
+            cvs: Array<{ versionName: string }>;
+            trackedApplications: Array<{ company: string }>;
+          };
+        };
+        assert.equal(dossierBody.dossier.summary.originCountry, 'Haïti');
+        assert.equal(dossierBody.dossier.cvs.length, 1);
+        assert.equal(dossierBody.dossier.trackedApplications[0]?.company, 'Acme Global');
+
+        // Promoted admin approves & verifies memberUser
+        const approveRes = await fetch(
+          `${baseUrl}/api/admin/users/${encodeURIComponent(memberUser.uid)}/moderate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${promotedToken}`,
+            },
+            body: JSON.stringify({
+              moderationStatus: 'approved',
+              emailVerified: true,
+              accountRole: 'recruiter',
+              moderationNote: 'Dossier vérifié',
+            }),
+          }
+        );
+        assert.equal(approveRes.status, 200);
+        const approvedMember = getAuthUserByEmail(memberEmail)!;
+        assert.equal(approvedMember.emailVerified, true);
+        assert.equal(approvedMember.accountRole, 'recruiter');
+        assert.equal(approvedMember.moderationStatus, 'approved');
+
+        // Member can log in while approved
+        const okLoginRes = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: memberEmail, password: testPwd }),
+        });
+        assert.equal(okLoginRes.status, 200);
+        const okLoginBody = (await okLoginRes.json()) as { token: string };
+
+        // Admin suspends/rejects member -> existing session immediately invalid (401) & login blocked (403 ACCOUNT_MODERATED)
+        const rejectRes = await fetch(
+          `${baseUrl}/api/admin/users/${encodeURIComponent(memberUser.uid)}/moderate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${promotedToken}`,
+            },
+            body: JSON.stringify({
+              moderationStatus: 'rejected',
+              moderationNote: 'Documents non conformes',
+            }),
+          }
+        );
+        assert.equal(rejectRes.status, 200);
+
+        const blockedTokenMe = await fetch(`${baseUrl}/api/auth/me`, {
+          headers: { Authorization: `Bearer ${okLoginBody.token}` },
+        });
+        assert.equal(blockedTokenMe.status, 401, 'Rejected/suspended user session token must immediately stop working');
+
+        const blockedLogin = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: memberEmail, password: testPwd }),
+        });
+        assert.equal(blockedLogin.status, 403, 'Rejected/suspended user must receive 403 on login');
+        const blockedLoginBody = (await blockedLogin.json()) as { code?: string };
+        assert.equal(blockedLoginBody.code, 'ACCOUNT_MODERATED');
+
+        // Admin moderates a submitted application (approve -> reject)
+        const subResult = await submitRealApplication({
+          userId: memberUser.uid,
+          candidateEmail: memberEmail,
+          candidateName: 'Membre Standard',
+          companyName: 'Global Corp',
+          roleTitle: 'BI Analyst',
+          opportunityType: 'published_job',
+          channel: 'jobfounds_direct',
+          recruiterId: seedAdmin.uid,
+          subject: 'Candidature BI Analyst',
+          coverLetter: 'Lettre de motivation réelle pour test admin.',
+          explicitAuthorization: true,
+        });
+        createdSubIds.push(subResult.submission.id);
+
+        const modSubApprove = await fetch(
+          `${baseUrl}/api/admin/applications/${encodeURIComponent(subResult.submission.id)}/moderate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${promotedToken}`,
+            },
+            body: JSON.stringify({ status: 'approved', note: 'Candidature validée' }),
+          }
+        );
+        assert.equal(modSubApprove.status, 200);
+        const modSubBody = (await modSubApprove.json()) as {
+          submission: { adminModerationStatus: string };
+        };
+        assert.equal(modSubBody.submission.adminModerationStatus, 'approved');
+
+        const modSubReject = await fetch(
+          `${baseUrl}/api/admin/applications/${encodeURIComponent(subResult.submission.id)}/moderate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${promotedToken}`,
+            },
+            body: JSON.stringify({ status: 'rejected', note: 'Incomplète' }),
+          }
+        );
+        assert.equal(modSubReject.status, 200);
+        const modSubRejectBody = (await modSubReject.json()) as {
+          submission: { adminModerationStatus: string };
+        };
+        assert.equal(modSubRejectBody.submission.adminModerationStatus, 'rejected');
+
+        // Bootstrap owner cannot be revoked (400)
+        const revokeOwnerRes = await fetch(`${baseUrl}/api/admin/admins/revoke`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${promotedToken}`,
+          },
+          body: JSON.stringify({ email: BOOTSTRAP_ADMIN_EMAIL }),
+        });
+        assert.equal(revokeOwnerRes.status, 400, 'Bootstrap owner admin cannot be revoked');
+
+        // Seed admin revokes promotedEmail -> promotedEmail loses admin access immediately (403)
+        const revokePromotedRes = await fetch(`${baseUrl}/api/admin/admins/revoke`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${seedToken}`,
+          },
+          body: JSON.stringify({ email: promotedEmail }),
+        });
+        assert.equal(revokePromotedRes.status, 200);
+
+        const afterRevokeRes = await fetch(`${baseUrl}/api/admin/users`, {
+          headers: { Authorization: `Bearer ${promotedToken}` },
+        });
+        assert.equal(afterRevokeRes.status, 403, 'Revoked admin must immediately receive 403');
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        const db = getEngineDb();
+        for (const sid of createdSubIds) {
+          db.prepare('DELETE FROM application_submissions WHERE id = ?').run(sid);
+        }
+        for (const email of createdAdminEmails) {
+          revokeAdminRoleByEmail(email);
+          db.prepare('DELETE FROM audit_logs WHERE actor_email = ? OR target_id = ?').run(
+            email,
+            email
+          );
+        }
+        for (const uid of createdUids) {
+          db.prepare('DELETE FROM notifications WHERE uid = ?').run(uid);
+          db.prepare('DELETE FROM audit_logs WHERE actor_uid = ? OR target_id = ?').run(uid, uid);
+          deleteAuthUserByUid(uid);
+        }
+      }
+    });
+
+    // 27. Unified Google/Firebase User Visibility for Email/Password Admins + Hard Server Lockout on Suspension
+    await check('Google/Firebase users mirror to SQLite directory for Email/Password admins and are hard-blocked (403) when suspended/rejected', async () => {
+      registerAppTokenVerifier(verifyAppSessionToken);
+      registerUserModerationChecker(getAccountModerationStatus);
+
+      const stamp = Date.now();
+      const adminEmail = `pwd-admin-${stamp}@jobfounds-test.invalid`;
+      const googleEmail = `google-member-${stamp}@jobfounds-test.invalid`;
+      const googleUid = `firebase_google_uid_${stamp}`;
+      const testPwd = 'AdminSecret#2026!';
+
+      const { passwordHash, passwordSalt } = createPasswordCredentials(testPwd);
+      const adminUser = createAuthUserRecord({
+        email: adminEmail,
+        fullName: 'Password Admin',
+        passwordHash,
+        passwordSalt,
+      });
+      markAuthUserEmailVerified(adminUser.uid);
+      grantAdminRoleByEmail(adminEmail, BOOTSTRAP_ADMIN_EMAIL, 'Test 27 Password Admin');
+      const adminToken = issueAppSessionToken({ ...adminUser, emailVerified: true });
+
+      const app = express();
+      app.use(express.json());
+      // Test hook simulating verified Firebase Google ID token alongside real attachFirebaseAuth
+      app.use('/api', (req: any, _res, next) => {
+        if (req.headers['x-test-google-user'] === '1') {
+          req.authUser = {
+            uid: googleUid,
+            email: googleEmail,
+            name: 'Marie Google',
+            emailVerified: true,
+            provider: 'firebase',
+            isAdmin: false,
+          };
+          return next();
+        }
+        return attachFirebaseAuth(req, _res, next);
+      });
+      app.use('/api', createAuthRouter());
+      app.get('/api/protected-workspace', requireFirebaseAuth, (req: any, res) => {
+        res.json({ ok: true, uid: req.authUser.uid, provider: req.authUser.provider });
+      });
+
+      const srv = await new Promise<http.Server>((resolve) => {
+        const s = app.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const addr = srv.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+      try {
+        // 1. Google user syncs directory & workspace (and cannot self-escalate moderationStatus/isAdmin)
+        const syncRes = await fetch(`${baseUrl}/api/account/sync-directory`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-test-google-user': '1',
+          },
+          body: JSON.stringify({
+            fullName: 'Marie Google',
+            accountRole: 'candidate',
+            lang: 'fr',
+            discoverable: true,
+            gdprConsent: true,
+            profile: {
+              fullName: 'Marie Google',
+              currentTitle: 'Product Designer',
+              originCountry: 'Haïti',
+              preferredCountries: ['Canada', 'France'],
+              skills: ['Figma', 'UX Research'],
+              languages: ['Français', 'Anglais', 'Créole haïtien'],
+            },
+            cvs: [
+              {
+                id: `cv_google_${stamp}`,
+                versionName: 'CV UX Global',
+                fullName: 'Marie Google',
+                headline: 'Product Designer',
+                location: 'Port-au-Prince',
+                skills: ['Figma'],
+                updatedDate: '2026-11-28',
+              },
+            ],
+            applications: [
+              {
+                id: `app_google_${stamp}`,
+                company: 'Shopify',
+                role: 'Staff Product Designer',
+                stage: 'Applied',
+                type: 'published_job',
+                dateAdded: '2026-11-28',
+              },
+            ],
+            isAdmin: true,
+            moderationStatus: 'approved',
+          }),
+        });
+        assert.equal(syncRes.status, 200, 'Google user directory sync must succeed');
+
+        // 2. Email/Password Admin sees the Google user in /api/admin/users AND full dossier in /api/admin/users/:uid
+        const listRes = await fetch(`${baseUrl}/api/admin/users`, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        assert.equal(listRes.status, 200);
+        const listBody = (await listRes.json()) as {
+          users: Array<{ uid: string; email: string; provider: string; cvsCount: number; trackedAppsCount: number }>;
+        };
+        const foundGoogle = listBody.users.find((u) => u.email === googleEmail);
+        assert.ok(foundGoogle, 'Email/Password admin MUST see Google/Firebase users in unified directory');
+        assert.equal(foundGoogle!.provider, 'firebase');
+        assert.equal(foundGoogle!.cvsCount, 1);
+        assert.equal(foundGoogle!.trackedAppsCount, 1);
+
+        const dossierRes = await fetch(`${baseUrl}/api/admin/users/${encodeURIComponent(googleUid)}`, {
+          headers: { Authorization: `Bearer ${adminToken}` },
+        });
+        assert.equal(dossierRes.status, 200);
+        const dossierBody = (await dossierRes.json()) as {
+          dossier: {
+            summary: { provider: string; originCountry: string };
+            cvs: Array<{ versionName: string }>;
+            trackedApplications: Array<{ company: string }>;
+          };
+        };
+        assert.equal(dossierBody.dossier.summary.provider, 'firebase');
+        assert.equal(dossierBody.dossier.summary.originCountry, 'Haïti');
+        assert.equal(dossierBody.dossier.cvs[0]?.versionName, 'CV UX Global');
+        assert.equal(dossierBody.dossier.trackedApplications[0]?.company, 'Shopify');
+
+        // 3. Before suspension, Google user accesses /api/auth/me and /api/protected-workspace -> 200
+        const okMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+          headers: { 'x-test-google-user': '1' },
+        });
+        assert.equal(okMeRes.status, 200);
+        const okProtRes = await fetch(`${baseUrl}/api/protected-workspace`, {
+          headers: { 'x-test-google-user': '1' },
+        });
+        assert.equal(okProtRes.status, 200);
+
+        // 4. Admin suspends Google user -> BOTH /api/auth/me and protected APIs immediately return 403 ACCOUNT_MODERATED
+        const suspendRes = await fetch(
+          `${baseUrl}/api/admin/users/${encodeURIComponent(googleUid)}/moderate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              email: googleEmail,
+              moderationStatus: 'suspended',
+              moderationNote: 'Activité suspecte vérifiée',
+            }),
+          }
+        );
+        assert.equal(suspendRes.status, 200);
+
+        const blockedMeRes = await fetch(`${baseUrl}/api/auth/me`, {
+          headers: { 'x-test-google-user': '1' },
+        });
+        assert.equal(blockedMeRes.status, 403, 'Suspended Google user must get 403 on /api/auth/me');
+        const blockedMeBody = (await blockedMeRes.json()) as {
+          code?: string;
+          moderationStatus?: string;
+          moderationNote?: string;
+        };
+        assert.equal(blockedMeBody.code, 'ACCOUNT_MODERATED');
+        assert.equal(blockedMeBody.moderationStatus, 'suspended');
+        assert.equal(blockedMeBody.moderationNote, 'Activité suspecte vérifiée');
+
+        const blockedProtRes = await fetch(`${baseUrl}/api/protected-workspace`, {
+          headers: { 'x-test-google-user': '1' },
+        });
+        assert.equal(
+          blockedProtRes.status,
+          403,
+          'Suspended Google user must get 403 on all requireFirebaseAuth endpoints'
+        );
+        const blockedProtBody = (await blockedProtRes.json()) as { code?: string };
+        assert.equal(blockedProtBody.code, 'ACCOUNT_MODERATED');
+
+        // 5. Admin re-approves Google user -> access immediately restored (200)
+        const restoreRes = await fetch(
+          `${baseUrl}/api/admin/users/${encodeURIComponent(googleUid)}/moderate`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminToken}`,
+            },
+            body: JSON.stringify({
+              email: googleEmail,
+              moderationStatus: 'approved',
+              moderationNote: 'Réactivé après vérification',
+            }),
+          }
+        );
+        assert.equal(restoreRes.status, 200);
+
+        const restoredProtRes = await fetch(`${baseUrl}/api/protected-workspace`, {
+          headers: { 'x-test-google-user': '1' },
+        });
+        assert.equal(restoredProtRes.status, 200, 'Re-approved Google user must regain 200 access');
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        const db = getEngineDb();
+        db.prepare('DELETE FROM account_directory WHERE email = ? OR uid = ?').run(googleEmail, googleUid);
+        db.prepare('DELETE FROM user_workspace_data WHERE uid = ?').run(googleUid);
+        db.prepare('DELETE FROM audit_logs WHERE actor_email = ? OR target_id = ? OR target_id = ?').run(
+          adminEmail,
+          googleUid,
+          googleEmail
+        );
+        revokeAdminRoleByEmail(adminEmail);
+        deleteAuthUserByUid(adminUser.uid);
+      }
+    });
+
+    // 28. Zero Fictitious Data, 9-Criteria Canonical Parity & Candidate Metadata Persistence
+    await check('Zero fictitious seed data, 9-criteria canonical parity, and submission candidate identity persistence', async () => {
+      const initMod = await import('../src/data/initialData.ts');
+      assert.equal(initMod.initialJobs.length, 0, 'initialJobs must be empty');
+      assert.equal(initMod.initialHiddenOpportunities.length, 0, 'initialHiddenOpportunities must be empty');
+      assert.equal(initMod.initialApplications.length, 0, 'initialApplications must be empty');
+      assert.equal(initMod.initialWatchlist.length, 0, 'initialWatchlist must be empty');
+      assert.equal(initMod.initialCvDocuments.length, 0, 'initialCvDocuments must be empty');
+      assert.equal(initMod.initialCandidateProfile.fullName, '', 'initialCandidateProfile.fullName must be empty');
+
+      const baseline = initMod.computeBaselineMatch(
+        {
+          ...initMod.initialCandidateProfile,
+          fullName: 'Real Candidate',
+          currentTitle: 'Backend Engineer',
+          yearsExperience: 5,
+          highestDegree: 'Master',
+          skills: ['TypeScript', 'Node.js'],
+          languages: ['French', 'English'],
+          preferredCountries: ['Canada'],
+          preferredCities: ['Montreal'],
+          workAuthorization: 'Work permit',
+          availability: 'Immediate',
+          minSalaryAnnualUsd: 80000,
+        },
+        {
+          id: 'verify_parity_job',
+          title: 'Backend Engineer',
+          company: 'Verified Corp',
+          country: 'Canada',
+          city: 'Montreal',
+          workMode: 'Hybrid',
+          contractType: 'Full-time',
+          experienceLevel: 'Mid-level',
+          degreeRequired: 'Bachelor',
+          salaryRange: '90,000 - 110,000 USD',
+          salaryMinAnnualUsd: 90000,
+          languages: ['English', 'French'],
+          skills: ['TypeScript', 'Node.js'],
+          publishedDate: new Date().toISOString().slice(0, 10),
+          sourceName: 'Official ATS',
+          sourceUrl: 'https://jobs.ashbyhq.com/linear',
+          verificationStatus: 'Verified',
+          verificationSummary: 'Verified ATS feed',
+          description: 'Backend TypeScript role in Montreal.',
+        }
+      );
+      const canonicalKeys = [
+        'skills',
+        'experience',
+        'education',
+        'languages',
+        'locationAndMobility',
+        'workAuthorization',
+        'availability',
+        'salary',
+        'sourceReliability',
+      ] as const;
+      assert.deepEqual(Object.keys(baseline.breakdown).sort(), [...canonicalKeys].sort());
+
+      const portalSub = await submitRealApplication({
+        userId: testUid,
+        candidateEmail: 'candidate-real@example.com',
+        candidateName: 'Candidate RealName',
+        companyId: primaryCompanyId,
+        companyName: 'Linear TestCorp',
+        roleTitle: 'Senior Backend Engineer',
+        opportunityType: 'published_job',
+        channel: 'official_portal',
+        officialUrl: 'https://jobs.ashbyhq.com/linear',
+        subject: 'Candidature Senior Backend Engineer',
+        coverLetter: 'Bonjour, voici ma candidature officielle vérifiée.',
+        explicitAuthorization: true,
+      });
+      assert.equal(portalSub.transmitted, false, 'official_portal must NEVER mark transmitted=true');
+      assert.equal(portalSub.deliveryStatus, 'awaiting_portal_confirmation');
+      assert.equal(portalSub.submission.candidateName, 'Candidate RealName');
+      assert.equal(portalSub.submission.candidateEmail, 'candidate-real@example.com');
+    });
+
+    // 29. Universal Employer Job Publishing (Email/Password + Google) & Owner Scoping
+    await check('Email/Password employer can publish, list, and close employer jobs with strict owner enforcement', async () => {
+      const empEmail = `emp_pub_${Date.now()}@jobfounds-test.local`;
+      const otherEmail = `emp_other_${Date.now()}@jobfounds-test.local`;
+      const empCreds = createPasswordCredentials('EmpPass!2026');
+      const otherCreds = createPasswordCredentials('OtherPass!2026');
+      const empReg = createAuthUserRecord({
+        email: empEmail,
+        passwordHash: empCreds.passwordHash,
+        passwordSalt: empCreds.passwordSalt,
+        fullName: 'Marie Employeur',
+      });
+      const otherReg = createAuthUserRecord({
+        email: otherEmail,
+        passwordHash: otherCreds.passwordHash,
+        passwordSalt: otherCreds.passwordSalt,
+        fullName: 'Paul Autre',
+      });
+      markAuthUserEmailVerified(empReg.uid);
+      markAuthUserEmailVerified(otherReg.uid);
+
+      const empToken = issueAppSessionToken({ ...empReg, emailVerified: true });
+      const otherToken = issueAppSessionToken({ ...otherReg, emailVerified: true });
+
+      const app = express();
+      app.use(express.json());
+      app.use('/api', attachFirebaseAuth);
+      app.use('/api', createIntelligenceRouter());
+      const srv = await new Promise<http.Server>((resolve) => {
+        const s = app.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const addr = srv.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+      let publishedId = '';
+      try {
+        // Unauthenticated publish must be blocked (401)
+        const unauthRes = await fetch(`${baseUrl}/api/employer/jobs`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            companyName: 'Test Employer Co',
+            title: 'Full-Stack Developer',
+            description: 'Role description with at least ten characters.',
+          }),
+        });
+        assert.equal(unauthRes.status, 401);
+
+        // Email/Password recruiter publishes job (201)
+        const pubRes = await fetch(`${baseUrl}/api/employer/jobs`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${empToken}`,
+          },
+          body: JSON.stringify({
+            companyName: 'Caraïbes Tech SA',
+            companyWebsite: 'https://caraibestech.example.com',
+            title: 'Ingénieur Full-Stack Node.js',
+            country: 'Haïti',
+            city: 'Port-au-Prince',
+            workMode: 'Hybrid',
+            contractType: 'Full-time',
+            salaryRange: '45 000 - 60 000 USD',
+            skills: ['TypeScript', 'Node.js', 'React'],
+            description: 'Développement de plateformes web et APIs sécurisées pour la région Caraïbes.',
+          }),
+        });
+        assert.equal(pubRes.status, 201);
+        const pubData = (await pubRes.json()) as { job: { id: string; recruiterId: string; country: string } };
+        assert.ok(pubData.job.id.startsWith('empjob_'));
+        assert.equal(pubData.job.recruiterId, empReg.uid);
+        assert.equal(pubData.job.country, 'Haïti');
+        publishedId = pubData.job.id;
+
+        // Public listing exposes the new employer job
+        const listRes = await fetch(`${baseUrl}/api/employer/jobs`);
+        assert.equal(listRes.status, 200);
+        const listData = (await listRes.json()) as { jobs: Array<{ id: string }> };
+        assert.ok(listData.jobs.some((j) => j.id === publishedId));
+
+        // Another user cannot close someone else's job (404)
+        const stealRes = await fetch(
+          `${baseUrl}/api/employer/jobs/${encodeURIComponent(publishedId)}/close`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${otherToken}`,
+            },
+            body: JSON.stringify({}),
+          }
+        );
+        assert.equal(stealRes.status, 404);
+
+        // Owner closes job (200) -> removed from open list
+        const closeRes = await fetch(
+          `${baseUrl}/api/employer/jobs/${encodeURIComponent(publishedId)}/close`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${empToken}`,
+            },
+            body: JSON.stringify({}),
+          }
+        );
+        assert.equal(closeRes.status, 200);
+
+        const afterRes = await fetch(`${baseUrl}/api/employer/jobs`);
+        const afterData = (await afterRes.json()) as { jobs: Array<{ id: string }> };
+        assert.ok(!afterData.jobs.some((j) => j.id === publishedId));
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        const db = getEngineDb();
+        if (publishedId) {
+          db.prepare('DELETE FROM employer_jobs WHERE id = ?').run(publishedId);
+          db.prepare('DELETE FROM audit_logs WHERE target_id = ?').run(publishedId);
+        }
+        deleteAuthUserByUid(empReg.uid);
+        deleteAuthUserByUid(otherReg.uid);
       }
     });
 

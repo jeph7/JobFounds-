@@ -668,6 +668,8 @@ export async function submitRealApplication(
         recordSourceCall('resend_email', false, `HTTP ${res.status}: ${errText}`);
         const failedSub = createApplicationSubmission({
           userId: input.userId,
+          candidateName: input.candidateName,
+          candidateEmail: input.candidateEmail,
           applicationId: input.applicationId,
           companyId: input.companyId,
           companyName,
@@ -703,6 +705,8 @@ export async function submitRealApplication(
 
       const sentSub = createApplicationSubmission({
         userId: input.userId,
+        candidateName: input.candidateName,
+        candidateEmail: input.candidateEmail,
         applicationId: input.applicationId,
         companyId: input.companyId,
         companyName,
@@ -715,6 +719,7 @@ export async function submitRealApplication(
         officialUrl: input.officialUrl,
         subject,
         coverLetterPreview: coverLetter.slice(0, 1000),
+        coverLetterFull: coverLetter,
         cvVersionName: input.cvVersionName,
         attachments: metadata,
         explicitAuthorization: true,
@@ -722,6 +727,18 @@ export async function submitRealApplication(
         transmitted: true,
         deliveryStatus: 'transmitted_email',
         providerMessageId: messageId,
+      });
+
+      createNotification({
+        uid: input.userId,
+        type: 'application_update',
+        title: `Candidature transmise par e-mail : ${roleTitle}`,
+        body: `Votre dossier pour ${roleTitle} chez ${companyName} a été réellement transmis à ${recipientEmail}${messageId ? ` (Réf. ${messageId})` : ''}.`,
+        companyId: input.companyId || '',
+        companyName,
+        classification: 'confirmed_job',
+        channelStatus: { inApp: true, emailSent: true, pushReady: false },
+        dedupKey: `email_app_${sentSub.id}`,
       });
 
       return {
@@ -736,6 +753,8 @@ export async function submitRealApplication(
       recordSourceCall('resend_email', false, errMsg);
       const failedSub = createApplicationSubmission({
         userId: input.userId,
+        candidateName: input.candidateName,
+        candidateEmail: input.candidateEmail,
         applicationId: input.applicationId,
         companyId: input.companyId,
         companyName,
@@ -837,6 +856,8 @@ export async function submitRealApplication(
   if (availabilityCheck.status === 'expired') {
     const failedSub = createApplicationSubmission({
       userId: input.userId,
+      candidateName: input.candidateName,
+      candidateEmail: input.candidateEmail,
       applicationId: input.applicationId,
       companyId: input.companyId,
       companyName,
@@ -869,6 +890,8 @@ export async function submitRealApplication(
 
   const handoffSub = createApplicationSubmission({
     userId: input.userId,
+    candidateName: input.candidateName,
+    candidateEmail: input.candidateEmail,
     applicationId: input.applicationId,
     companyId: input.companyId,
     companyName,
@@ -880,6 +903,7 @@ export async function submitRealApplication(
     officialUrl: availabilityCheck.finalUrl || officialUrl,
     subject,
     coverLetterPreview: coverLetter.slice(0, 1000),
+    coverLetterFull: coverLetter,
     cvVersionName: input.cvVersionName,
     attachments: metadata,
     explicitAuthorization: true,
