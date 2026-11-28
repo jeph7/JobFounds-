@@ -16,7 +16,8 @@
     "cron:tick": "node scripts/cron-worker.js",
     "preview": "vite preview",
     "clean": "rm -rf dist dist-server",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "postinstall": "node scripts/postinstall-build.mjs"
   },
   "dependencies": {
     "@google/genai": "^3.6.1",
@@ -60,11 +61,13 @@
   "overrides": {
     "@grpc/grpc-js": "^1.14.7",
     "minimatch": "^11.0.9",
-    "glob": "^14.0.6"
+    "glob": "^14.0.6",
+    "websocket-driver": "^0.8.1"
   },
   "resolutions": {
     "@grpc/grpc-js": "^1.14.7",
     "minimatch": "^11.0.9",
-    "glob": "^14.0.6"
+    "glob": "^14.0.6",
+    "websocket-driver": "^0.8.1"
   }
 }

@@ -334,12 +334,24 @@ async function startServer() {
     const storage = getEngineStorageInfo();
     const workerMode = getWorkerMode();
     const rssMb = Math.round(process.memoryUsage().rss / (1024 * 1024));
+    const rootDir =
+      process.env.JOBFOUNDS_PROJECT_ROOT ||
+      (fs.existsSync(path.join(__dirname, 'package.json'))
+        ? __dirname
+        : path.resolve(__dirname, '..'));
+    const distIndexPath = path.resolve(rootDir, 'dist', 'index.html');
+    const frontendReady = fs.existsSync(distIndexPath);
+    const frontendBuiltAt = frontendReady ? fs.statSync(distIndexPath).mtime.toISOString() : null;
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
       ok: true,
       status: 'ok',
       engine: {
         sqliteReady: storage.dbExists,
         persistentExternalStorage: storage.usesExternalPersistentDir,
+        frontendReady,
+        frontendBuiltAt,
+        frontendBuildError: process.env.JOBFOUNDS_CLIENT_BUILD_ERROR || null,
         workerMode,
         backgroundWorkerActive: workerMode === 'loop' || Boolean(process.env.CRON_SECRET?.trim()),
         cronEndpointConfigured: Boolean(process.env.CRON_SECRET?.trim()),
@@ -1634,12 +1646,54 @@ export class ErrorOverlay extends HTMLElement {}
     app.use(vite.middlewares);
   } else {
     const indexHtmlPath = path.join(distPath, 'index.html');
-    if (fs.existsSync(indexHtmlPath)) {
-      app.use(express.static(distPath));
-      app.get('*', (_req, res) => {
-        res.sendFile(indexHtmlPath);
-      });
+    const setNoCacheHeaders = (res: express.Response) => {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    };
+
+    app.use('/assets/aistudio', (_req, res) => {
+      res.status(404).end();
+    });
+
+    if (fs.existsSync(distPath)) {
+      app.use(
+        express.static(distPath, {
+          index: false,
+          setHeaders(res, filePath) {
+            const base = path.basename(filePath).toLowerCase();
+            if (
+              base === 'index.html' ||
+              base === 'sw.js' ||
+              base === 'registersw.js' ||
+              base === 'manifest.webmanifest'
+            ) {
+              setNoCacheHeaders(res);
+            } else if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+              res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+            }
+          },
+        })
+      );
     }
+
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api/')) {
+        next();
+        return;
+      }
+      setNoCacheHeaders(res);
+      if (fs.existsSync(indexHtmlPath)) {
+        res.sendFile(indexHtmlPath);
+        return;
+      }
+      res
+        .status(503)
+        .type('text/plain; charset=utf-8')
+        .send(
+          'JOBFOUNDS frontend bundle (dist/index.html) is not built yet. Run "npm run build" and restart the Node.js application.'
+        );
+    });
   }
 
   httpServer.listen(PORT, '0.0.0.0', () => {
