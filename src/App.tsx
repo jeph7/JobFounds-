@@ -48,7 +48,16 @@ import {
   updateUserAccount,
 } from './utils/firestoreService';
 import type { ApplicationModalTarget } from './components/ApplicationSubmissionModal';
-import { AppAuthUser, fetchUserNotifications, setAppSessionToken } from './utils/api';
+import {
+  AppAuthUser,
+  authFetchCurrentSession,
+  authLogout,
+  deleteServerWorkspace,
+  fetchServerWorkspace,
+  fetchUserNotifications,
+  saveServerWorkspace,
+  setAppSessionToken,
+} from './utils/api';
 import { MobileBottomNav, Sidebar, TopHeader } from './components/Sidebar';
 import { BrandLogo } from './components/ui';
 import { OfflineIndicator } from './components/PWAInstallButton';
@@ -216,13 +225,96 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const seededRef = useRef<Record<string, boolean>>({});
+  const hydratedPasswordUidRef = useRef<string | null>(null);
+  const passwordUserRef = useRef<AppAuthUser | null>(passwordUser);
   const cvVersionsRef = useRef(cvVersions);
   const profileRef = useRef(profile);
+  const applicationsRef = useRef(applications);
+  const watchlistRef = useRef(watchlist);
+  const accountRoleRef = useRef(accountRole);
   const langRef = useRef(lang);
+  const discoverableRef = useRef(discoverable);
+  const gdprConsentRef = useRef(gdprConsent);
+  const companyNameRef = useRef(companyName);
+  const companyWebsiteRef = useRef(companyWebsite);
 
+  passwordUserRef.current = passwordUser;
   cvVersionsRef.current = cvVersions;
   profileRef.current = profile;
+  applicationsRef.current = applications;
+  watchlistRef.current = watchlist;
+  accountRoleRef.current = accountRole;
   langRef.current = lang;
+  discoverableRef.current = discoverable;
+  gdprConsentRef.current = gdprConsent;
+  companyNameRef.current = companyName;
+  companyWebsiteRef.current = companyWebsite;
+
+  const hydratePasswordWorkspace = async (user: AppAuthUser) => {
+    try {
+      const res = await fetchServerWorkspace();
+      const ws = res.workspace;
+      if (ws) {
+        if (ws.accountRole === 'candidate' || ws.accountRole === 'recruiter') {
+          setAccountRole(ws.accountRole);
+        }
+        if (ws.lang && ['fr', 'en', 'es', 'de', 'ar'].includes(ws.lang)) {
+          setLang(ws.lang as Lang);
+        }
+        setDiscoverable(Boolean(ws.discoverable));
+        setGdprConsent(ws.gdprConsent !== false);
+        setCompanyName(ws.companyName || '');
+        setCompanyWebsite(ws.companyWebsite || '');
+
+        if (ws.profile && !isLegacyDemoProfile(ws.profile)) {
+          setProfile({
+            ...ws.profile,
+            fullName: ws.profile.fullName || user.fullName || '',
+          });
+        } else if (user.fullName && !profileRef.current.fullName) {
+          setProfile((prev) => ({ ...prev, fullName: user.fullName }));
+        }
+
+        if (Array.isArray(ws.cvs)) {
+          const cleanCvs = ws.cvs.filter((cv) => !isLegacyDemoCv(cv));
+          setCvVersions(cleanCvs);
+          setActiveCvId((curr) =>
+            cleanCvs.some((c) => c.id === curr) ? curr : cleanCvs[0]?.id ?? ''
+          );
+        }
+        if (Array.isArray(ws.applications)) {
+          setApplications(ws.applications as TrackedApplication[]);
+        }
+        if (Array.isArray(ws.watchlist)) {
+          setWatchlist(ws.watchlist as WatchlistItem[]);
+        }
+      } else {
+        const mergedProfile: CandidateProfile = {
+          ...profileRef.current,
+          fullName: profileRef.current.fullName || user.fullName || '',
+        };
+        if (mergedProfile.fullName !== profileRef.current.fullName) {
+          setProfile(mergedProfile);
+        }
+        await saveServerWorkspace({
+          profile: mergedProfile,
+          cvs: cvVersionsRef.current.filter((cv) => !isLegacyDemoCv(cv)),
+          applications: applicationsRef.current,
+          watchlist: watchlistRef.current,
+          accountRole: user.accountRole || accountRoleRef.current,
+          lang: langRef.current,
+          discoverable: discoverableRef.current,
+          gdprConsent: gdprConsentRef.current,
+          companyName: companyNameRef.current,
+          companyWebsite: companyWebsiteRef.current,
+        }).catch(() => {});
+      }
+      hydratedPasswordUidRef.current = user.uid;
+    } catch {
+      // Allow subsequent saves even if initial load failed transiently
+      hydratedPasswordUidRef.current = user.uid;
+    }
+  };
 
   const showNotice = (msg: string) => {
     setToastMessage(msg);
@@ -293,11 +385,13 @@ export default function App() {
       setAuthUser(user);
 
       if (!user) {
-        setIsAdmin(false);
+        if (!passwordUserRef.current?.emailVerified) {
+          setIsAdmin(false);
+          setServerUnreadNotifs(0);
+        }
         setCompanyJobs([]);
         setPublicCandidates([]);
         setConversations([]);
-        setServerUnreadNotifs(0);
         return;
       }
 
@@ -391,6 +485,71 @@ export default function App() {
       unsubAuth();
     };
   }, []);
+
+  // Restore persistent HttpOnly cookie session for Email/Password users across page refreshes
+  useEffect(() => {
+    let cancelled = false;
+    authFetchCurrentSession()
+      .then(async (session) => {
+        if (cancelled || !session.authenticated || !session.user) return;
+        if (session.user.provider !== 'password') return;
+        if (session.token) {
+          setAppSessionToken(session.token);
+        }
+        setPasswordUser(session.user);
+        if (session.user.emailVerified) {
+          setIsAdmin(Boolean(session.user.isAdmin));
+          setAccountRole(session.user.accountRole);
+          await hydratePasswordWorkspace(session.user);
+          fetchUserNotifications()
+            .then((res) => {
+              if (!cancelled) setServerUnreadNotifs(res.unreadCount || 0);
+            })
+            .catch(() => {});
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Auto-persist workspace mutations to SQLite for verified Email/Password accounts
+  useEffect(() => {
+    if (authUser) return;
+    if (!passwordUser?.emailVerified) return;
+    if (hydratedPasswordUidRef.current !== passwordUser.uid) return;
+
+    const timer = window.setTimeout(() => {
+      saveServerWorkspace({
+        profile,
+        cvs: cvVersions,
+        applications,
+        watchlist,
+        accountRole,
+        lang,
+        discoverable,
+        gdprConsent,
+        companyName,
+        companyWebsite,
+      }).catch(() => {});
+    }, 500);
+
+    return () => window.clearTimeout(timer);
+  }, [
+    authUser,
+    passwordUser,
+    profile,
+    cvVersions,
+    applications,
+    watchlist,
+    accountRole,
+    lang,
+    discoverable,
+    gdprConsent,
+    companyName,
+    companyWebsite,
+  ]);
 
   // Merge live employer postings from Firestore with search jobs
   const mergedJobs = useMemo(() => {
@@ -491,6 +650,7 @@ export default function App() {
   };
 
   const handlePasswordAuthenticated = (user: AppAuthUser, token: string) => {
+    hydratedPasswordUidRef.current = null;
     setAppSessionToken(token);
     setPasswordUser(user);
     setIsAdmin(Boolean(user.isAdmin));
@@ -499,6 +659,7 @@ export default function App() {
       setProfile((prev) => ({ ...prev, fullName: user.fullName }));
     }
     setAuthModalOpen(false);
+    hydratePasswordWorkspace(user).catch(() => {});
     fetchUserNotifications()
       .then((res) => setServerUnreadNotifs(res.unreadCount || 0))
       .catch(() => {});
@@ -511,12 +672,15 @@ export default function App() {
   };
 
   const handlePasswordUnverified = (user: AppAuthUser, token: string) => {
+    hydratedPasswordUidRef.current = null;
     setAppSessionToken(token);
     setPasswordUser(user);
   };
 
   const handleSignOut = async () => {
     try {
+      hydratedPasswordUidRef.current = null;
+      await authLogout().catch(() => {});
       setPasswordUser(null);
       setAppSessionToken(null);
       setIsAdmin(false);
@@ -719,6 +883,11 @@ export default function App() {
   };
 
   const handleDeleteAllData = async () => {
+    hydratedPasswordUidRef.current = null;
+    if (passwordUser) {
+      await deleteServerWorkspace(true).catch(() => {});
+      await authLogout().catch(() => {});
+    }
     setPasswordUser(null);
     setAppSessionToken(null);
     setIsAdmin(false);

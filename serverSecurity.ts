@@ -135,6 +135,40 @@ export async function verifyFirebaseIdToken(token: string): Promise<VerifiedAuth
   }
 }
 
+export const SESSION_COOKIE_NAME = 'jf_session';
+
+export function parseCookieValue(cookieHeader: string | undefined, name: string): string {
+  if (!cookieHeader || typeof cookieHeader !== 'string') return '';
+  const pairs = cookieHeader.split(';');
+  for (const part of pairs) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = part.slice(0, eqIdx).trim();
+    if (key === name) {
+      try {
+        return decodeURIComponent(part.slice(eqIdx + 1).trim());
+      } catch {
+        return part.slice(eqIdx + 1).trim();
+      }
+    }
+  }
+  return '';
+}
+
+function isSameOriginMutation(req: Request): boolean {
+  const method = (req.method || 'GET').toUpperCase();
+  if (method === 'GET' || method === 'HEAD' || method === 'OPTIONS') return true;
+  const origin = String(req.headers.origin || '').trim();
+  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').trim().toLowerCase();
+  if (!origin || !host) return true;
+  try {
+    const parsedOrigin = new URL(origin);
+    return parsedOrigin.host.toLowerCase() === host;
+  } catch {
+    return false;
+  }
+}
+
 type AppSessionVerifier = (token: string) => VerifiedAuthUser | null;
 let appSessionVerifier: AppSessionVerifier | null = null;
 
@@ -143,8 +177,8 @@ export function registerAppTokenVerifier(fn: AppSessionVerifier): void {
 }
 
 /**
- * Express middleware that verifies optional JOBFOUNDS session token or Firebase Bearer token
- * and attaches req.authUser (preserving emailVerified for strict server-side gating).
+ * Express middleware that verifies optional Authorization Bearer token (JOBFOUNDS session or Firebase JWT)
+ * or HttpOnly jf_session cookie and attaches req.authUser (preserving emailVerified for strict server-side gating).
  */
 export async function attachFirebaseAuth(
   req: AuthedRequest,
@@ -160,6 +194,13 @@ export async function attachFirebaseAuth(
     } else {
       req.authUser = await verifyFirebaseIdToken(token);
     }
+    next();
+    return;
+  }
+
+  const cookieToken = parseCookieValue(req.headers.cookie, SESSION_COOKIE_NAME);
+  if (cookieToken && appSessionVerifier && isSameOriginMutation(req)) {
+    req.authUser = appSessionVerifier(cookieToken);
   } else {
     req.authUser = null;
   }

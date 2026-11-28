@@ -700,9 +700,26 @@ export function getEngineDb(): DatabaseSync {
   safeAddColumn('application_submissions', "employer_status TEXT DEFAULT 'received'");
   safeAddColumn('application_submissions', "employer_reply TEXT DEFAULT ''");
   safeAddColumn('application_submissions', 'employer_replied_at TEXT');
+  safeAddColumn('email_verification_codes', "purpose TEXT NOT NULL DEFAULT 'verify_email'");
   db.exec(
     'CREATE INDEX IF NOT EXISTS idx_app_submissions_recruiter ON application_submissions(recruiter_id, created_at DESC);'
   );
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS user_workspace_data (
+      uid TEXT PRIMARY KEY,
+      profile_json TEXT NOT NULL DEFAULT '{}',
+      cvs_json TEXT NOT NULL DEFAULT '[]',
+      applications_json TEXT NOT NULL DEFAULT '[]',
+      watchlist_json TEXT NOT NULL DEFAULT '[]',
+      account_role TEXT NOT NULL DEFAULT 'candidate',
+      lang TEXT NOT NULL DEFAULT 'fr',
+      discoverable INTEGER NOT NULL DEFAULT 0,
+      gdpr_consent INTEGER NOT NULL DEFAULT 1,
+      company_name TEXT NOT NULL DEFAULT '',
+      company_website TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL
+    );
+  `);
 
   // Initialize real external source registry (connector definitions only — zero fake business data)
   const defaultSources: Array<{
@@ -2578,10 +2595,13 @@ export interface AuthUserRecord {
   updatedAt: string;
 }
 
+export type VerificationCodePurpose = 'verify_email' | 'reset_password';
+
 export interface EmailVerificationCodeRecord {
   id: string;
   userId: string;
   email: string;
+  purpose: VerificationCodePurpose;
   codeHash: string;
   codeSalt: string;
   expiresAt: string;
@@ -2589,6 +2609,21 @@ export interface EmailVerificationCodeRecord {
   maxAttempts: number;
   consumedAt: string | null;
   createdAt: string;
+}
+
+export interface UserWorkspaceRecord {
+  uid: string;
+  profile: Record<string, any> | null;
+  cvs: Array<Record<string, any>>;
+  applications: Array<Record<string, any>>;
+  watchlist: Array<Record<string, any>>;
+  accountRole: 'candidate' | 'recruiter';
+  lang: string;
+  discoverable: boolean;
+  gdprConsent: boolean;
+  companyName: string;
+  companyWebsite: string;
+  updatedAt: string;
 }
 
 function mapAuthUserRow(row: Record<string, any>): AuthUserRecord {
@@ -2611,6 +2646,7 @@ function mapVerificationCodeRow(row: Record<string, any>): EmailVerificationCode
     id: String(row.id),
     userId: String(row.user_id),
     email: String(row.email),
+    purpose: row.purpose === 'reset_password' ? 'reset_password' : 'verify_email',
     codeHash: String(row.code_hash),
     codeSalt: String(row.code_salt),
     expiresAt: String(row.expires_at),
@@ -2674,14 +2710,32 @@ export function markAuthUserEmailVerified(uid: string): AuthUserRecord | null {
   return getAuthUserByUid(uid);
 }
 
+export function updateAuthUserPassword(
+  uid: string,
+  passwordHash: string,
+  passwordSalt: string
+): AuthUserRecord | null {
+  const db = getEngineDb();
+  const now = new Date().toISOString();
+  db.prepare(
+    `UPDATE auth_users
+     SET password_hash = ?, password_salt = ?, email_verified = 1,
+         verified_at = COALESCE(verified_at, ?), updated_at = ?
+     WHERE uid = ?`
+  ).run(passwordHash, passwordSalt, now, now, uid);
+  return getAuthUserByUid(uid);
+}
+
 export function deleteAuthUserByUid(uid: string): void {
   const db = getEngineDb();
+  db.prepare('DELETE FROM user_workspace_data WHERE uid = ?').run(uid);
   db.prepare('DELETE FROM auth_users WHERE uid = ?').run(uid);
 }
 
 export function createEmailVerificationCodeRecord(input: {
   userId: string;
   email: string;
+  purpose?: VerificationCodePurpose;
   codeHash: string;
   codeSalt: string;
   expiresAt: string;
@@ -2691,18 +2745,20 @@ export function createEmailVerificationCodeRecord(input: {
   const now = new Date().toISOString();
   const id = `evc_${crypto.randomBytes(10).toString('hex')}`;
   const email = input.email.trim().toLowerCase();
+  const purpose: VerificationCodePurpose =
+    input.purpose === 'reset_password' ? 'reset_password' : 'verify_email';
   const maxAttempts = Math.max(1, Math.min(10, input.maxAttempts ?? 5));
 
-  // Invalidate any prior unconsumed codes for this user
+  // Invalidate any prior unconsumed codes for this user + purpose
   db.prepare(
-    'UPDATE email_verification_codes SET consumed_at = ? WHERE user_id = ? AND consumed_at IS NULL'
-  ).run(now, input.userId);
+    'UPDATE email_verification_codes SET consumed_at = ? WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL'
+  ).run(now, input.userId, purpose);
 
   db.prepare(
     `INSERT INTO email_verification_codes (
-      id, user_id, email, code_hash, code_salt, expires_at, attempts, max_attempts, consumed_at, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)`
-  ).run(id, input.userId, email, input.codeHash, input.codeSalt, input.expiresAt, maxAttempts, now);
+      id, user_id, email, purpose, code_hash, code_salt, expires_at, attempts, max_attempts, consumed_at, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?)`
+  ).run(id, input.userId, email, purpose, input.codeHash, input.codeSalt, input.expiresAt, maxAttempts, now);
 
   const row = db
     .prepare('SELECT * FROM email_verification_codes WHERE id = ? LIMIT 1')
@@ -2711,30 +2767,32 @@ export function createEmailVerificationCodeRecord(input: {
 }
 
 export function getLatestActiveVerificationCode(
-  userId: string
+  userId: string,
+  purpose: VerificationCodePurpose = 'verify_email'
 ): EmailVerificationCodeRecord | null {
   const db = getEngineDb();
   const row = db
     .prepare(
       `SELECT * FROM email_verification_codes
-       WHERE user_id = ? AND consumed_at IS NULL
+       WHERE user_id = ? AND purpose = ? AND consumed_at IS NULL
        ORDER BY created_at DESC LIMIT 1`
     )
-    .get(userId) as Record<string, any> | undefined;
+    .get(userId, purpose) as Record<string, any> | undefined;
   return row ? mapVerificationCodeRow(row) : null;
 }
 
 export function getLatestVerificationCodeAny(
-  userId: string
+  userId: string,
+  purpose: VerificationCodePurpose = 'verify_email'
 ): EmailVerificationCodeRecord | null {
   const db = getEngineDb();
   const row = db
     .prepare(
       `SELECT * FROM email_verification_codes
-       WHERE user_id = ?
+       WHERE user_id = ? AND purpose = ?
        ORDER BY created_at DESC LIMIT 1`
     )
-    .get(userId) as Record<string, any> | undefined;
+    .get(userId, purpose) as Record<string, any> | undefined;
   return row ? mapVerificationCodeRow(row) : null;
 }
 
@@ -2754,4 +2812,128 @@ export function consumeVerificationCode(codeId: string): void {
   const now = new Date().toISOString();
   db.prepare('UPDATE email_verification_codes SET consumed_at = ? WHERE id = ?').run(now, codeId);
 }
+
+export function getUserWorkspaceData(uid: string): UserWorkspaceRecord | null {
+  const db = getEngineDb();
+  const cleanUid = uid.trim();
+  if (!cleanUid) return null;
+  const row = db
+    .prepare('SELECT * FROM user_workspace_data WHERE uid = ? LIMIT 1')
+    .get(cleanUid) as Record<string, any> | undefined;
+  if (!row) return null;
+  const parsedProfile = safeJsonParse<Record<string, any> | null>(row.profile_json, null);
+  return {
+    uid: String(row.uid),
+    profile: parsedProfile && Object.keys(parsedProfile).length > 0 ? parsedProfile : null,
+    cvs: safeJsonParse<Array<Record<string, any>>>(row.cvs_json, []),
+    applications: safeJsonParse<Array<Record<string, any>>>(row.applications_json, []),
+    watchlist: safeJsonParse<Array<Record<string, any>>>(row.watchlist_json, []),
+    accountRole: row.account_role === 'recruiter' ? 'recruiter' : 'candidate',
+    lang: String(row.lang || 'fr'),
+    discoverable: Boolean(row.discoverable),
+    gdprConsent: row.gdpr_consent !== 0,
+    companyName: String(row.company_name || ''),
+    companyWebsite: String(row.company_website || ''),
+    updatedAt: String(row.updated_at),
+  };
+}
+
+export function upsertUserWorkspaceData(
+  uid: string,
+  patch: Partial<{
+    profile: Record<string, any> | null;
+    cvs: Array<Record<string, any>>;
+    applications: Array<Record<string, any>>;
+    watchlist: Array<Record<string, any>>;
+    accountRole: 'candidate' | 'recruiter';
+    lang: string;
+    discoverable: boolean;
+    gdprConsent: boolean;
+    companyName: string;
+    companyWebsite: string;
+  }>
+): UserWorkspaceRecord {
+  const db = getEngineDb();
+  const existing = getUserWorkspaceData(uid);
+  const now = new Date().toISOString();
+
+  const nextProfile = patch.profile !== undefined ? patch.profile : existing?.profile ?? null;
+  const nextCvs = Array.isArray(patch.cvs) ? patch.cvs.slice(0, 25) : existing?.cvs ?? [];
+  const nextApps = Array.isArray(patch.applications)
+    ? patch.applications.slice(0, 200)
+    : existing?.applications ?? [];
+  const nextWatch = Array.isArray(patch.watchlist)
+    ? patch.watchlist.slice(0, 100)
+    : existing?.watchlist ?? [];
+  const nextRole =
+    patch.accountRole === 'recruiter'
+      ? 'recruiter'
+      : patch.accountRole === 'candidate'
+        ? 'candidate'
+        : existing?.accountRole ?? 'candidate';
+  const allowedLangs = new Set(['fr', 'en', 'es', 'de', 'pt', 'ar']);
+  const nextLang =
+    typeof patch.lang === 'string' && allowedLangs.has(patch.lang)
+      ? patch.lang
+      : existing?.lang ?? 'fr';
+  const nextDiscoverable =
+    typeof patch.discoverable === 'boolean' ? patch.discoverable : existing?.discoverable ?? false;
+  const nextGdpr =
+    typeof patch.gdprConsent === 'boolean' ? patch.gdprConsent : existing?.gdprConsent ?? true;
+  const nextCompName =
+    typeof patch.companyName === 'string'
+      ? clampStr(patch.companyName, 140)
+      : existing?.companyName ?? '';
+  const nextCompWeb =
+    typeof patch.companyWebsite === 'string'
+      ? clampStr(patch.companyWebsite, 300)
+      : existing?.companyWebsite ?? '';
+
+  db.prepare(
+    `INSERT INTO user_workspace_data (
+      uid, profile_json, cvs_json, applications_json, watchlist_json,
+      account_role, lang, discoverable, gdpr_consent, company_name, company_website, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(uid) DO UPDATE SET
+      profile_json = excluded.profile_json,
+      cvs_json = excluded.cvs_json,
+      applications_json = excluded.applications_json,
+      watchlist_json = excluded.watchlist_json,
+      account_role = excluded.account_role,
+      lang = excluded.lang,
+      discoverable = excluded.discoverable,
+      gdpr_consent = excluded.gdpr_consent,
+      company_name = excluded.company_name,
+      company_website = excluded.company_website,
+      updated_at = excluded.updated_at`
+  ).run(
+    uid,
+    JSON.stringify(nextProfile || {}),
+    JSON.stringify(nextCvs),
+    JSON.stringify(nextApps),
+    JSON.stringify(nextWatch),
+    nextRole,
+    nextLang,
+    nextDiscoverable ? 1 : 0,
+    nextGdpr ? 1 : 0,
+    nextCompName,
+    nextCompWeb,
+    now
+  );
+
+  // Keep account_role synced on auth_users if present
+  db.prepare('UPDATE auth_users SET account_role = ?, updated_at = ? WHERE uid = ?').run(
+    nextRole,
+    now,
+    uid
+  );
+
+  return getUserWorkspaceData(uid)!;
+}
+
+export function deleteUserWorkspaceData(uid: string): void {
+  const db = getEngineDb();
+  db.prepare('DELETE FROM user_workspace_data WHERE uid = ?').run(uid);
+}
+
 

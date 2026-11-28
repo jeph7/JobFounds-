@@ -145,8 +145,94 @@ export function authResendVerificationCode(payload: { email: string }) {
   }>('/api/auth/resend-code', payload);
 }
 
+export function authForgotPassword(payload: { email: string }) {
+  return postJson<{
+    emailSent: boolean;
+    emailReason: string;
+    expiresAt?: string;
+    cooldownSeconds?: number;
+  }>('/api/auth/forgot-password', payload);
+}
+
+export function authResetPassword(payload: {
+  email: string;
+  code: string;
+  newPassword: string;
+}) {
+  return postJson<{
+    reset: boolean;
+    user: AppAuthUser;
+    token: string;
+    message: string;
+  }>('/api/auth/reset-password', payload);
+}
+
+export function authLogout() {
+  return postJson<{ ok: boolean }>('/api/auth/logout', {});
+}
+
+export async function authFetchCurrentSession(): Promise<{
+  authenticated: boolean;
+  user?: AppAuthUser;
+  token?: string;
+}> {
+  try {
+    const res = await fetch('/api/auth/me', {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: await getAuthHeaders(),
+    });
+    if (!res.ok) {
+      return { authenticated: false };
+    }
+    const data = await res.json().catch(() => ({ authenticated: false }));
+    return data as { authenticated: boolean; user?: AppAuthUser; token?: string };
+  } catch {
+    return { authenticated: false };
+  }
+}
+
+export interface ServerWorkspaceData {
+  uid: string;
+  profile: CandidateProfile | null;
+  cvs: CvDocument[];
+  applications: any[];
+  watchlist: any[];
+  accountRole: 'candidate' | 'recruiter';
+  lang: string;
+  discoverable: boolean;
+  gdprConsent: boolean;
+  companyName: string;
+  companyWebsite: string;
+  updatedAt: string;
+}
+
+export function fetchServerWorkspace() {
+  return requestJson<{ workspace: ServerWorkspaceData | null }>('GET', '/api/account/workspace');
+}
+
+export function saveServerWorkspace(patch: {
+  profile?: CandidateProfile | null;
+  cvs?: CvDocument[];
+  applications?: any[];
+  watchlist?: any[];
+  accountRole?: 'candidate' | 'recruiter';
+  lang?: string;
+  discoverable?: boolean;
+  gdprConsent?: boolean;
+  companyName?: string;
+  companyWebsite?: string;
+}) {
+  return requestJson<{ workspace: ServerWorkspaceData }>('PUT', '/api/account/workspace', patch);
+}
+
+export function deleteServerWorkspace(deleteAccount = false) {
+  const qs = deleteAccount ? '?deleteAccount=true' : '';
+  return requestJson<{ deleted: boolean }>('DELETE', `/api/account/workspace${qs}`);
+}
+
 async function requestJson<T>(
-  method: 'GET' | 'POST' | 'PATCH' | 'PUT',
+  method: 'GET' | 'POST' | 'PATCH' | 'PUT' | 'DELETE',
   url: string,
   body?: unknown,
   extraHeaders?: Record<string, string>
@@ -154,6 +240,7 @@ async function requestJson<T>(
   const headers = { ...(await getAuthHeaders()), ...(extraHeaders || {}) };
   const res = await fetch(url, {
     method,
+    credentials: 'same-origin',
     headers,
     body: body !== undefined ? JSON.stringify(body) : undefined,
   });
@@ -795,6 +882,7 @@ export async function downloadSubmissionAttachment(
     `/api/employer/applications/${encodeURIComponent(submissionId)}/attachments/${index}`,
     {
       method: 'GET',
+      credentials: 'same-origin',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     }
   );
@@ -930,6 +1018,7 @@ export async function downloadAdminDeployBundle(): Promise<void> {
   const token = (await resolveBearerToken()) || '';
   const res = await fetch('/api/admin/deploy/package', {
     method: 'GET',
+    credentials: 'same-origin',
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
   if (!res.ok) {

@@ -2,24 +2,32 @@ import crypto from 'crypto';
 import express from 'express';
 import {
   type AuthUserRecord,
+  type VerificationCodePurpose,
   consumeVerificationCode,
   createAuthUserRecord,
   createEmailVerificationCodeRecord,
+  deleteAuthUserByUid,
+  deleteUserWorkspaceData,
   getAuthUserByEmail,
   getAuthUserByUid,
   getLatestActiveVerificationCode,
   getLatestVerificationCodeAny,
+  getUserWorkspaceData,
   incrementVerificationCodeAttempts,
   markAuthUserEmailVerified,
   recordSourceCall,
+  updateAuthUserPassword,
+  upsertUserWorkspaceData,
 } from './serverEngineDb.ts';
 import { getResendFromEmail } from './serverApplicationEngine.ts';
 import {
   type AuthedRequest,
+  SESSION_COOKIE_NAME,
   type VerifiedAuthUser,
   clampStr,
   createRateLimiter,
   isAdminAuthUser,
+  requireFirebaseAuth,
 } from './serverSecurity.ts';
 
 // Session signing key from environment or ephemeral in-memory 256-bit key (never hardcoded)
@@ -59,11 +67,52 @@ function toPublicUser(user: AuthUserRecord): PublicAuthUser {
   };
 }
 
+function isHttpsRequest(req: express.Request): boolean {
+  const xfProto = String(req.headers['x-forwarded-proto'] || '').split(',')[0].trim().toLowerCase();
+  return Boolean(req.secure || xfProto === 'https');
+}
+
+function setSessionCookie(req: express.Request, res: express.Response, token: string): void {
+  const secure = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    'Path=/',
+    'HttpOnly',
+    `Max-Age=${SESSION_TTL_SECONDS}`,
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (secure) {
+    parts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
+function clearSessionCookie(req: express.Request, res: express.Response): void {
+  const secure = isHttpsRequest(req);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=`,
+    'Path=/',
+    'HttpOnly',
+    'Max-Age=0',
+    'Expires=Thu, 01 Jan 1970 00:00:00 GMT',
+    secure ? 'SameSite=None' : 'SameSite=Lax',
+  ];
+  if (secure) {
+    parts.push('Secure');
+  }
+  res.setHeader('Set-Cookie', parts.join('; '));
+}
+
 function hashSecretScrypt(secret: string, saltHex: string, keyLen = 64): string {
   return crypto.scryptSync(secret, saltHex, keyLen, { N: 16384, r: 8, p: 1 }).toString('hex');
 }
 
-function verifySecretScrypt(secret: string, saltHex: string, expectedHashHex: string, keyLen = 64): boolean {
+function verifySecretScrypt(
+  secret: string,
+  saltHex: string,
+  expectedHashHex: string,
+  keyLen = 64
+): boolean {
   const actual = Buffer.from(hashSecretScrypt(secret, saltHex, keyLen), 'hex');
   const expected = Buffer.from(expectedHashHex, 'hex');
   if (actual.length !== expected.length) return false;
@@ -101,7 +150,7 @@ export function generateFiveDigitCode(): string {
 }
 
 /**
- * Issues a server-signed HMAC-SHA256 session token (jf1.<payload>.<signature>).
+ * Issues a server-signed HMAC-SHA256 session token (header.payload.signature).
  */
 export function issueAppSessionToken(user: AuthUserRecord): string {
   const nowSec = Math.floor(Date.now() / 1000);
@@ -172,13 +221,14 @@ export interface VerificationEmailDispatchResult {
 }
 
 /**
- * Sends the 5-digit account confirmation code via Resend API.
+ * Sends a 5-digit verification or password-reset code via Resend API.
  * Honest reporting: NEVER claims sent=true unless Resend confirms HTTP 2xx.
  */
 export async function sendVerificationCodeEmail(params: {
   to: string;
   fullName: string;
   code: string;
+  purpose?: VerificationCodePurpose;
 }): Promise<VerificationEmailDispatchResult> {
   const apiKey = (process.env.RESEND_API_KEY || '').trim();
   const fromEmail = getResendFromEmail();
@@ -187,7 +237,7 @@ export async function sendVerificationCodeEmail(params: {
     return {
       sent: false,
       reason:
-        'Le service d’envoi d’e-mail (RESEND_API_KEY) n’est pas configuré sur le serveur. Configurez RESEND_API_KEY pour envoyer le code de confirmation.',
+        'Le service d’envoi d’e-mail (RESEND_API_KEY) n’est pas configuré sur le serveur. Configurez RESEND_API_KEY pour envoyer le code à 5 chiffres.',
     };
   }
   if (!fromEmail) {
@@ -198,9 +248,22 @@ export async function sendVerificationCodeEmail(params: {
     };
   }
 
+  const isReset = params.purpose === 'reset_password';
   const safeName = escapeHtml(params.fullName || 'Candidat');
   const safeCode = escapeHtml(params.code);
-  const subject = `${params.code} — Votre code de confirmation JOBFOUNDS`;
+  const subject = isReset
+    ? `${params.code} — Réinitialisation de votre mot de passe JOBFOUNDS`
+    : `${params.code} — Votre code de confirmation JOBFOUNDS`;
+
+  const headline = isReset
+    ? 'Réinitialisation de votre mot de passe'
+    : 'Confirmez votre adresse e-mail';
+  const leadParagraph = isReset
+    ? 'Vous avez demandé à réinitialiser le mot de passe de votre compte JOBFOUNDS. Saisissez le code de sécurité à <strong>5 chiffres</strong> ci-dessous :'
+    : 'Pour valider la création de votre compte JOBFOUNDS et accéder à votre espace personnel, saisissez le code de confirmation à <strong>5 chiffres</strong> ci-dessous :';
+  const footnote = isReset
+    ? 'Si vous n’êtes pas à l’origine de cette demande, ignorez cet e-mail : votre mot de passe actuel reste inchangé.'
+    : 'Sans la saisie de ce code, votre compte ne sera pas activé. Si vous n’êtes pas à l’origine de cette inscription, ignorez cet e-mail en toute sécurité.';
 
   const html = `<!doctype html>
 <html lang="fr">
@@ -209,18 +272,18 @@ export async function sendVerificationCodeEmail(params: {
       <tr>
         <td style="background:#06132F;padding:20px 28px;color:#FFFFFF;">
           <div style="font-size:12px;letter-spacing:0.12em;text-transform:uppercase;color:#A9D8F5;font-weight:700;">JOBFOUNDS</div>
-          <div style="font-size:19px;font-weight:700;margin-top:6px;">Confirmez votre adresse e-mail</div>
+          <div style="font-size:19px;font-weight:700;margin-top:6px;">${headline}</div>
         </td>
       </tr>
       <tr>
         <td style="padding:28px;font-size:14px;line-height:1.65;color:#1E293B;">
           <p style="margin:0 0 14px;">Bonjour <strong>${safeName}</strong>,</p>
-          <p style="margin:0 0 18px;">Pour valider la création de votre compte JOBFOUNDS et accéder à votre espace personnel, saisissez le code de confirmation à <strong>5 chiffres</strong> ci-dessous :</p>
+          <p style="margin:0 0 18px;">${leadParagraph}</p>
           <div style="margin:22px 0;padding:18px;background:#F0F7FF;border:1px solid #BFDBFE;border-radius:12px;text-align:center;">
             <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:34px;font-weight:800;letter-spacing:0.32em;color:#06132F;">${safeCode}</span>
           </div>
           <p style="margin:0 0 10px;font-size:13px;color:#475569;">Ce code est valable pendant <strong>15 minutes</strong> et ne peut être utilisé qu’une seule fois.</p>
-          <p style="margin:0;font-size:12px;color:#64748B;">Sans la saisie de ce code, votre compte ne sera pas activé. Si vous n’êtes pas à l’origine de cette inscription, vous pouvez ignorer cet e-mail en toute sécurité.</p>
+          <p style="margin:0;font-size:12px;color:#64748B;">${footnote}</p>
         </td>
       </tr>
       <tr>
@@ -232,14 +295,23 @@ export async function sendVerificationCodeEmail(params: {
   </body>
 </html>`;
 
-  const text = [
-    `Bonjour ${params.fullName || 'Candidat'},`,
-    '',
-    `Votre code de confirmation JOBFOUNDS à 5 chiffres est : ${params.code}`,
-    '',
-    'Ce code est valable pendant 15 minutes. Sans ce code, votre compte ne sera pas validé.',
-    "Si vous n'avez pas demandé ce code, ignorez cet e-mail.",
-  ].join('\n');
+  const text = isReset
+    ? [
+        `Bonjour ${params.fullName || 'Candidat'},`,
+        '',
+        `Votre code JOBFOUNDS à 5 chiffres pour réinitialiser votre mot de passe est : ${params.code}`,
+        '',
+        'Ce code est valable pendant 15 minutes et ne peut être utilisé qu’une seule fois.',
+        "Si vous n'avez pas demandé cette réinitialisation, ignorez cet e-mail.",
+      ].join('\n')
+    : [
+        `Bonjour ${params.fullName || 'Candidat'},`,
+        '',
+        `Votre code de confirmation JOBFOUNDS à 5 chiffres est : ${params.code}`,
+        '',
+        'Ce code est valable pendant 15 minutes. Sans ce code, votre compte ne sera pas validé.',
+        "Si vous n'avez pas demandé ce code, ignorez cet e-mail.",
+      ].join('\n');
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10_000);
@@ -260,13 +332,17 @@ export async function sendVerificationCodeEmail(params: {
       }),
     });
 
-    const data = (await res.json().catch(() => ({}))) as { id?: string; message?: string; error?: string };
+    const data = (await res.json().catch(() => ({}))) as {
+      id?: string;
+      message?: string;
+      error?: string;
+    };
     if (!res.ok) {
       const errDetail = data?.message || data?.error || `HTTP ${res.status}`;
-      recordSourceCall('resend_email', false, `Verification code email failed: ${errDetail}`);
+      recordSourceCall('resend_email', false, `Auth code email failed: ${errDetail}`);
       return {
         sent: false,
-        reason: `L’envoi de l’e-mail de confirmation via Resend a échoué (${errDetail}). Vérifiez la configuration du domaine expéditeur dans Resend.`,
+        reason: `L’envoi de l’e-mail via Resend a échoué (${errDetail}). Vérifiez que votre domaine expéditeur est bien validé dans Resend (DNS SPF/DKIM).`,
       };
     }
 
@@ -278,10 +354,10 @@ export async function sendVerificationCodeEmail(params: {
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    recordSourceCall('resend_email', false, `Verification email network error: ${msg}`);
+    recordSourceCall('resend_email', false, `Auth email network error: ${msg}`);
     return {
       sent: false,
-      reason: `Erreur réseau lors de l’envoi du code de confirmation (${msg}).`,
+      reason: `Erreur réseau lors de l’envoi du code (${msg}).`,
     };
   } finally {
     clearTimeout(timer);
@@ -289,11 +365,11 @@ export async function sendVerificationCodeEmail(params: {
 }
 
 /**
- * Generates, hashes, stores, and emails a 5-digit verification code for a user.
+ * Generates, hashes, stores, and emails a 5-digit code for a user (verification or password reset).
  */
 export async function issueAndSendFiveDigitCode(
   user: AuthUserRecord,
-  options?: { skipEmailForTest?: boolean }
+  options?: { purpose?: VerificationCodePurpose; skipEmailForTest?: boolean }
 ): Promise<{
   codeForTest?: string;
   expiresAt: string;
@@ -301,6 +377,8 @@ export async function issueAndSendFiveDigitCode(
   emailReason: string;
   messageId?: string;
 }> {
+  const purpose: VerificationCodePurpose =
+    options?.purpose === 'reset_password' ? 'reset_password' : 'verify_email';
   const code = generateFiveDigitCode();
   const codeSalt = crypto.randomBytes(16).toString('hex');
   const codeHash = hashSecretScrypt(code, codeSalt, 32);
@@ -309,6 +387,7 @@ export async function issueAndSendFiveDigitCode(
   createEmailVerificationCodeRecord({
     userId: user.uid,
     email: user.email,
+    purpose,
     codeHash,
     codeSalt,
     expiresAt,
@@ -328,6 +407,7 @@ export async function issueAndSendFiveDigitCode(
     to: user.email,
     fullName: user.fullName,
     code,
+    purpose,
   });
 
   return {
@@ -364,11 +444,12 @@ export function verifyPasswordCredentials(password: string, user: AuthUserRecord
 }
 
 /**
- * Verifies a 5-digit confirmation code against the latest active hashed record for the user.
+ * Verifies a 5-digit code strictly scoped to its purpose ('verify_email' or 'reset_password').
  */
 export function verifyFiveDigitCodeForUser(
   user: AuthUserRecord,
-  rawCode: string
+  rawCode: string,
+  purpose: VerificationCodePurpose = 'verify_email'
 ): {
   ok: boolean;
   status: number;
@@ -377,7 +458,7 @@ export function verifyFiveDigitCodeForUser(
   remainingAttempts?: number;
   user?: AuthUserRecord;
 } {
-  if (user.emailVerified) {
+  if (purpose === 'verify_email' && user.emailVerified) {
     return { ok: true, status: 200, user };
   }
 
@@ -387,17 +468,18 @@ export function verifyFiveDigitCodeForUser(
       ok: false,
       status: 400,
       code: 'INVALID_CODE_FORMAT',
-      error: 'Veuillez saisir un code de confirmation valide composé exactement de 5 chiffres.',
+      error: 'Veuillez saisir un code valide composé exactement de 5 chiffres.',
     };
   }
 
-  const record = getLatestActiveVerificationCode(user.uid);
+  const record = getLatestActiveVerificationCode(user.uid, purpose);
   if (!record) {
     return {
       ok: false,
       status: 400,
       code: 'NO_ACTIVE_CODE',
-      error: 'Aucun code actif trouvé. Cliquez sur « Renvoyer le code » pour recevoir un nouveau code à 5 chiffres.',
+      error:
+        'Aucun code actif trouvé. Demandez un nouveau code à 5 chiffres pour continuer.',
     };
   }
 
@@ -437,23 +519,27 @@ export function verifyFiveDigitCodeForUser(
       error:
         remaining > 0
           ? `Code incorrect. Il vous reste ${remaining} tentative${remaining > 1 ? 's' : ''}.`
-          : 'Code verrouillé après 5 essais incorrects. Cliquez sur « Renvoyer le code ».',
+          : 'Code verrouillé après 5 essais incorrects. Demandez un nouveau code.',
     };
   }
 
-  // Code matches: consume immediately and mark user verified
+  // Code matches: consume immediately
   consumeVerificationCode(record.id);
-  const verifiedUser = markAuthUserEmailVerified(user.uid);
-  if (!verifiedUser) {
-    return {
-      ok: false,
-      status: 500,
-      code: 'USER_UPDATE_FAILED',
-      error: 'Impossible de valider le compte.',
-    };
+
+  if (purpose === 'verify_email') {
+    const verifiedUser = markAuthUserEmailVerified(user.uid);
+    if (!verifiedUser) {
+      return {
+        ok: false,
+        status: 500,
+        code: 'USER_UPDATE_FAILED',
+        error: 'Impossible de valider le compte.',
+      };
+    }
+    return { ok: true, status: 200, user: verifiedUser };
   }
 
-  return { ok: true, status: 200, user: verifiedUser };
+  return { ok: true, status: 200, user };
 }
 
 export function createAuthRouter(): express.Router {
@@ -483,6 +569,18 @@ export function createAuthRouter(): express.Router {
     maxGuest: 8,
     bucketPrefix: 'auth_resend',
   });
+  const resetLimiter = createRateLimiter({
+    windowMs: 15 * 60_000,
+    maxAuthenticated: 10,
+    maxGuest: 10,
+    bucketPrefix: 'auth_reset',
+  });
+  const workspaceLimiter = createRateLimiter({
+    windowMs: 15 * 60_000,
+    maxAuthenticated: 180,
+    maxGuest: 20,
+    bucketPrefix: 'account_workspace',
+  });
 
   // 1. POST /api/auth/register — Create unverified account + send 5-digit code by email
   router.post('/auth/register', registerLimiter, async (req, res) => {
@@ -496,7 +594,10 @@ export function createAuthRouter(): express.Router {
       const password = typeof req.body?.password === 'string' ? req.body.password : '';
       const accountRole = req.body?.accountRole === 'recruiter' ? 'recruiter' : 'candidate';
 
-      if ((req.body?.firstName !== undefined || req.body?.lastName !== undefined) && (!lastName || !firstName)) {
+      if (
+        (req.body?.firstName !== undefined || req.body?.lastName !== undefined) &&
+        (!lastName || !firstName)
+      ) {
         res.status(400).json({ error: 'Veuillez renseigner votre nom et votre prénom.' });
         return;
       }
@@ -523,7 +624,6 @@ export function createAuthRouter(): express.Router {
           });
           return;
         }
-        // Account exists but was never verified: require password check or let them re-verify if password matches
         if (!verifyPasswordCredentials(password, existing)) {
           res.status(409).json({
             code: 'EMAIL_PENDING_VERIFICATION',
@@ -532,8 +632,9 @@ export function createAuthRouter(): express.Router {
           });
           return;
         }
-        const dispatch = await issueAndSendFiveDigitCode(existing);
+        const dispatch = await issueAndSendFiveDigitCode(existing, { purpose: 'verify_email' });
         const token = issueAppSessionToken(existing);
+        setSessionCookie(req, res, token);
         res.status(200).json({
           user: toPublicUser(existing),
           token,
@@ -555,8 +656,9 @@ export function createAuthRouter(): express.Router {
         accountRole,
       });
 
-      const dispatch = await issueAndSendFiveDigitCode(created);
+      const dispatch = await issueAndSendFiveDigitCode(created, { purpose: 'verify_email' });
       const token = issueAppSessionToken(created);
+      setSessionCookie(req, res, token);
 
       res.status(201).json({
         user: toPublicUser(created),
@@ -595,17 +697,17 @@ export function createAuthRouter(): express.Router {
       }
 
       const token = issueAppSessionToken(user);
+      setSessionCookie(req, res, token);
 
       if (!user.emailVerified) {
-        // Check if an active non-expired code exists; if not, send a fresh 5-digit code
-        const activeCode = getLatestActiveVerificationCode(user.uid);
+        const activeCode = getLatestActiveVerificationCode(user.uid, 'verify_email');
         let emailSent = false;
         let emailReason =
           'Votre compte n’est pas encore validé. Saisissez le code à 5 chiffres envoyé à votre adresse e-mail.';
         let expiresAt = activeCode?.expiresAt || '';
 
         if (!activeCode || Date.parse(activeCode.expiresAt) < Date.now()) {
-          const dispatch = await issueAndSendFiveDigitCode(user);
+          const dispatch = await issueAndSendFiveDigitCode(user, { purpose: 'verify_email' });
           emailSent = dispatch.emailSent;
           emailReason = dispatch.emailReason;
           expiresAt = dispatch.expiresAt;
@@ -640,7 +742,6 @@ export function createAuthRouter(): express.Router {
       const rawCode = clampStr(req.body?.code, 10);
       const bodyEmail = clampStr(req.body?.email, 200).toLowerCase();
 
-      // Identify user strictly via authenticated Bearer token OR matching email
       let user: AuthUserRecord | null = null;
       if (req.authUser?.uid) {
         user = getAuthUserByUid(req.authUser.uid);
@@ -656,7 +757,7 @@ export function createAuthRouter(): express.Router {
         return;
       }
 
-      const result = verifyFiveDigitCodeForUser(user, rawCode);
+      const result = verifyFiveDigitCodeForUser(user, rawCode, 'verify_email');
       if (!result.ok || !result.user) {
         res.status(result.status).json({
           code: result.code,
@@ -667,6 +768,7 @@ export function createAuthRouter(): express.Router {
       }
 
       const freshToken = issueAppSessionToken(result.user);
+      setSessionCookie(req, res, freshToken);
       res.status(200).json({
         verified: true,
         user: toPublicUser(result.user),
@@ -700,16 +802,18 @@ export function createAuthRouter(): express.Router {
       }
 
       if (user.emailVerified) {
+        const freshToken = issueAppSessionToken(user);
+        setSessionCookie(req, res, freshToken);
         res.status(200).json({
           alreadyVerified: true,
           user: toPublicUser(user),
-          token: issueAppSessionToken(user),
+          token: freshToken,
           message: 'Ce compte est déjà vérifié.',
         });
         return;
       }
 
-      const latest = getLatestVerificationCodeAny(user.uid);
+      const latest = getLatestVerificationCodeAny(user.uid, 'verify_email');
       if (latest) {
         const elapsedMs = Date.now() - Date.parse(latest.createdAt);
         if (elapsedMs >= 0 && elapsedMs < RESEND_COOLDOWN_MS) {
@@ -723,7 +827,7 @@ export function createAuthRouter(): express.Router {
         }
       }
 
-      const dispatch = await issueAndSendFiveDigitCode(user);
+      const dispatch = await issueAndSendFiveDigitCode(user, { purpose: 'verify_email' });
       res.status(200).json({
         emailSent: dispatch.emailSent,
         emailReason: dispatch.emailReason,
@@ -737,7 +841,126 @@ export function createAuthRouter(): express.Router {
     }
   });
 
-  // 5. GET /api/auth/me — Inspect current verified or unverified session
+  // 5. POST /api/auth/forgot-password — Request a 5-digit password reset code
+  router.post('/auth/forgot-password', resetLimiter, async (req, res) => {
+    try {
+      const email = clampStr(req.body?.email, 200).toLowerCase();
+      if (!EMAIL_REGEX.test(email)) {
+        res.status(400).json({ error: 'Veuillez saisir une adresse e-mail valide.' });
+        return;
+      }
+
+      const user = getAuthUserByEmail(email);
+      if (!user) {
+        // Avoid user-enumeration leak while remaining honest if email relay itself isn't configured
+        const relayReady = Boolean((process.env.RESEND_API_KEY || '').trim() && getResendFromEmail());
+        res.status(200).json({
+          emailSent: relayReady,
+          emailReason: relayReady
+            ? 'Si un compte JOBFOUNDS correspond à cette adresse, un code à 5 chiffres vient d’être envoyé.'
+            : 'Le service d’envoi d’e-mail Resend n’est pas configuré sur le serveur.',
+          cooldownSeconds: 60,
+        });
+        return;
+      }
+
+      const latest = getLatestVerificationCodeAny(user.uid, 'reset_password');
+      if (latest) {
+        const elapsedMs = Date.now() - Date.parse(latest.createdAt);
+        if (elapsedMs >= 0 && elapsedMs < RESEND_COOLDOWN_MS) {
+          const waitSec = Math.ceil((RESEND_COOLDOWN_MS - elapsedMs) / 1000);
+          res.status(429).json({
+            code: 'RESEND_COOLDOWN',
+            retryAfterSeconds: waitSec,
+            error: `Veuillez patienter ${waitSec}s avant de demander un nouveau code de réinitialisation.`,
+          });
+          return;
+        }
+      }
+
+      const dispatch = await issueAndSendFiveDigitCode(user, { purpose: 'reset_password' });
+      res.status(200).json({
+        emailSent: dispatch.emailSent,
+        emailReason: dispatch.emailSent
+          ? 'Si un compte JOBFOUNDS correspond à cette adresse, un code à 5 chiffres vient d’être envoyé.'
+          : dispatch.emailReason,
+        expiresAt: dispatch.expiresAt,
+        cooldownSeconds: 60,
+      });
+    } catch (err) {
+      res.status(500).json({
+        error:
+          err instanceof Error ? err.message : 'Erreur lors de la demande de réinitialisation.',
+      });
+    }
+  });
+
+  // 6. POST /api/auth/reset-password — Verify 5-digit reset code & set new password
+  router.post('/auth/reset-password', resetLimiter, (req, res) => {
+    try {
+      const email = clampStr(req.body?.email, 200).toLowerCase();
+      const code = clampStr(req.body?.code, 10);
+      const newPassword = typeof req.body?.newPassword === 'string' ? req.body.newPassword : '';
+
+      if (!EMAIL_REGEX.test(email)) {
+        res.status(400).json({ error: 'Adresse e-mail invalide.' });
+        return;
+      }
+      const pwdErr = validatePasswordStrength(newPassword);
+      if (pwdErr) {
+        res.status(400).json({ error: pwdErr });
+        return;
+      }
+
+      const user = getAuthUserByEmail(email);
+      if (!user) {
+        res.status(400).json({
+          code: 'INVALID_CODE',
+          error: 'Code invalide ou expiré. Vérifiez votre adresse e-mail et votre code à 5 chiffres.',
+        });
+        return;
+      }
+
+      const verification = verifyFiveDigitCodeForUser(user, code, 'reset_password');
+      if (!verification.ok) {
+        res.status(verification.status).json({
+          code: verification.code,
+          error: verification.error,
+          remainingAttempts: verification.remainingAttempts,
+        });
+        return;
+      }
+
+      const { passwordHash, passwordSalt } = createPasswordCredentials(newPassword);
+      const updated = updateAuthUserPassword(user.uid, passwordHash, passwordSalt);
+      if (!updated) {
+        res.status(500).json({ error: 'Impossible de mettre à jour le mot de passe.' });
+        return;
+      }
+
+      const freshToken = issueAppSessionToken(updated);
+      setSessionCookie(req, res, freshToken);
+
+      res.status(200).json({
+        reset: true,
+        user: toPublicUser(updated),
+        token: freshToken,
+        message: 'Mot de passe mis à jour avec succès ! Connexion en cours…',
+      });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Erreur lors de la réinitialisation.',
+      });
+    }
+  });
+
+  // 7. POST /api/auth/logout — Clear HttpOnly session cookie
+  router.post('/auth/logout', (req, res) => {
+    clearSessionCookie(req, res);
+    res.json({ ok: true });
+  });
+
+  // 8. GET /api/auth/me — Restore current session from HttpOnly cookie or Bearer token
   router.get('/auth/me', (req: AuthedRequest, res) => {
     if (!req.authUser?.uid) {
       res.status(401).json({ authenticated: false, code: 'AUTH_REQUIRED' });
@@ -745,9 +968,11 @@ export function createAuthRouter(): express.Router {
     }
     const dbUser = getAuthUserByUid(req.authUser.uid);
     if (dbUser) {
+      const freshToken = issueAppSessionToken(dbUser);
       res.json({
         authenticated: true,
         user: toPublicUser(dbUser),
+        token: freshToken,
       });
       return;
     }
@@ -763,6 +988,52 @@ export function createAuthRouter(): express.Router {
         provider: 'firebase',
       },
     });
+  });
+
+  // 9. GET /api/account/workspace — Load server-persisted profile, CVs, CRM & watchlist (verified users only)
+  router.get('/account/workspace', workspaceLimiter, requireFirebaseAuth, (req: AuthedRequest, res) => {
+    const uid = req.authUser!.uid;
+    const workspace = getUserWorkspaceData(uid);
+    res.json({ workspace });
+  });
+
+  // 10. PUT /api/account/workspace — Persist profile, CVs, CRM & watchlist in SQLite (strictly scoped to req.authUser.uid)
+  router.put('/account/workspace', workspaceLimiter, requireFirebaseAuth, (req: AuthedRequest, res) => {
+    try {
+      const uid = req.authUser!.uid;
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const workspace = upsertUserWorkspaceData(uid, {
+        profile: body.profile !== undefined ? body.profile : undefined,
+        cvs: Array.isArray(body.cvs) ? body.cvs : undefined,
+        applications: Array.isArray(body.applications) ? body.applications : undefined,
+        watchlist: Array.isArray(body.watchlist) ? body.watchlist : undefined,
+        accountRole:
+          body.accountRole === 'recruiter' || body.accountRole === 'candidate'
+            ? body.accountRole
+            : undefined,
+        lang: typeof body.lang === 'string' ? body.lang : undefined,
+        discoverable: typeof body.discoverable === 'boolean' ? body.discoverable : undefined,
+        gdprConsent: typeof body.gdprConsent === 'boolean' ? body.gdprConsent : undefined,
+        companyName: typeof body.companyName === 'string' ? body.companyName : undefined,
+        companyWebsite: typeof body.companyWebsite === 'string' ? body.companyWebsite : undefined,
+      });
+      res.json({ workspace });
+    } catch (err) {
+      res.status(500).json({
+        error: err instanceof Error ? err.message : 'Erreur lors de la sauvegarde du profil.',
+      });
+    }
+  });
+
+  // 11. DELETE /api/account/workspace — GDPR full erasure of server workspace & password account
+  router.delete('/account/workspace', workspaceLimiter, requireFirebaseAuth, (req: AuthedRequest, res) => {
+    const uid = req.authUser!.uid;
+    deleteUserWorkspaceData(uid);
+    if (req.query?.deleteAccount === 'true' && getAuthUserByUid(uid)) {
+      deleteAuthUserByUid(uid);
+      clearSessionCookie(req, res);
+    }
+    res.json({ deleted: true });
   });
 
   return router;

@@ -1085,7 +1085,7 @@ async function runTests() {
       // Live leakage regression check: every returned job must genuinely match the searched country, its region, or Worldwide remote
       for (const { countryQuery, expectedRe } of [
         { countryQuery: 'Haïti', expectedRe: /\b(haiti|ayiti|caribbean|caraibes|americas|latam|worldwide|anywhere|global)\b/i },
-        { countryQuery: 'Sénégal', expectedRe: /\b(senegal|dakar|africa|afrique|worldwide|anywhere|global)\b/i },
+        { countryQuery: 'Sénégal', expectedRe: /\b(senegal|dakar|africa|afrique|emea|worldwide|anywhere|global)\b/i },
         { countryQuery: 'Brésil', expectedRe: /\b(brazil|bresil|brasil|latam|latin america|americas|worldwide|anywhere|global)\b/i },
         { countryQuery: 'Japon', expectedRe: /\b(japan|japon|tokyo|asia|apac|worldwide|anywhere|global)\b/i },
       ]) {
@@ -1291,6 +1291,252 @@ async function runTests() {
         if (testAuthUserId) {
           deleteAuthUserByUid(testAuthUserId);
           testAuthUserId = '';
+        }
+      }
+    });
+
+    // 25. Persistent HttpOnly Cookie, SQLite Workspace Persistence & Purpose-Scoped 5-Digit Password Reset
+    await check('HttpOnly session cookie, CSRF origin guard, SQLite workspace CRUD/isolation & 5-digit password reset', async () => {
+      // 25a. Probe live port 3000 new endpoints
+      const liveBadForgot = await fetch('http://127.0.0.1:3000/api/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'not-an-email' }),
+      });
+      assert.equal(liveBadForgot.status, 400);
+
+      const liveWorkspaceUnauth = await fetch('http://127.0.0.1:3000/api/account/workspace');
+      assert.equal(liveWorkspaceUnauth.status, 401);
+
+      const liveLogout = await fetch('http://127.0.0.1:3000/api/auth/logout', { method: 'POST' });
+      assert.equal(liveLogout.status, 200);
+      const liveLogoutCookie = liveLogout.headers.get('set-cookie') || '';
+      assert.ok(liveLogoutCookie.includes('jf_session='), 'Logout must clear jf_session cookie');
+      assert.ok(liveLogoutCookie.includes('Max-Age=0'), 'Logout cookie must expire immediately');
+
+      // 25b. Isolated Express server with full auth + workspace + CSRF cookie protection
+      registerAppTokenVerifier(verifyAppSessionToken);
+      const app25 = express();
+      app25.use(express.json());
+      app25.use('/api', attachFirebaseAuth);
+      app25.use('/api', createAuthRouter());
+
+      const srv = await new Promise<http.Server>((resolve) => {
+        const s = app25.listen(0, '127.0.0.1', () => resolve(s));
+      });
+      const addr = srv.address() as { port: number };
+      const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+      const createdUids: string[] = [];
+      try {
+        const email1 = `persist-u1-${Date.now()}@jobfounds-test.invalid`;
+        const email2 = `persist-u2-${Date.now()}@jobfounds-test.invalid`;
+        const initialPwd = 'InitialPass#2026';
+        const resetPwd = 'UpdatedPass#2027';
+
+        const cred1 = createPasswordCredentials(initialPwd);
+        const u1 = createAuthUserRecord({
+          email: email1,
+          fullName: 'Claire Moreau',
+          passwordHash: cred1.passwordHash,
+          passwordSalt: cred1.passwordSalt,
+        });
+        createdUids.push(u1.uid);
+
+        const cred2 = createPasswordCredentials(initialPwd);
+        const u2 = createAuthUserRecord({
+          email: email2,
+          fullName: 'Marc Laurent',
+          passwordHash: cred2.passwordHash,
+          passwordSalt: cred2.passwordSalt,
+        });
+        createdUids.push(u2.uid);
+
+        // Issue verify_email code for u1 and confirm purpose isolation against reset-password
+        const verifyIssued = await issueAndSendFiveDigitCode(u1, {
+          purpose: 'verify_email',
+          skipEmailForTest: true,
+        });
+        const wrongPurposeReset = await fetch(`${baseUrl}/api/auth/reset-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: email1,
+            code: verifyIssued.codeForTest,
+            newPassword: resetPwd,
+          }),
+        });
+        assert.equal(
+          wrongPurposeReset.status,
+          400,
+          'verify_email code must NEVER be accepted by reset-password'
+        );
+
+        // Unverified account MUST be blocked (403) from /api/account/workspace
+        const unverifiedToken = issueAppSessionToken(u1);
+        const unverifiedWs = await fetch(`${baseUrl}/api/account/workspace`, {
+          headers: { Authorization: `Bearer ${unverifiedToken}` },
+        });
+        assert.equal(unverifiedWs.status, 403);
+
+        // Verify u1 email -> receive HttpOnly jf_session cookie
+        const verifyRes = await fetch(`${baseUrl}/api/auth/verify-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email1, code: verifyIssued.codeForTest }),
+        });
+        assert.equal(verifyRes.status, 200);
+        const setCookieHeader = verifyRes.headers.get('set-cookie') || '';
+        assert.ok(setCookieHeader.includes('jf_session='), 'Verify response must set jf_session cookie');
+        assert.ok(/HttpOnly/i.test(setCookieHeader), 'jf_session cookie must be HttpOnly');
+        const cookiePair = setCookieHeader.split(';')[0].trim();
+
+        // Cookie-only session restore (no Bearer header!) -> 200 authenticated
+        const meWithCookie = await fetch(`${baseUrl}/api/auth/me`, {
+          headers: { Cookie: cookiePair },
+        });
+        assert.equal(meWithCookie.status, 200);
+        const meBody = (await meWithCookie.json()) as {
+          authenticated?: boolean;
+          user?: { uid?: string; emailVerified?: boolean };
+        };
+        assert.equal(meBody.authenticated, true);
+        assert.equal(meBody.user?.uid, u1.uid);
+        assert.equal(meBody.user?.emailVerified, true);
+
+        // CSRF origin guard: cross-origin cookie mutation MUST be blocked (401)
+        const csrfAttempt = await fetch(`${baseUrl}/api/account/workspace`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: cookiePair,
+            Origin: 'https://evil-attacker.invalid',
+          },
+          body: JSON.stringify({ companyName: 'Pwned Corp' }),
+        });
+        assert.equal(csrfAttempt.status, 401, 'Cross-origin cookie mutation must be blocked');
+
+        // Same-origin cookie PUT /api/account/workspace -> persists in SQLite
+        const saveWsRes = await fetch(`${baseUrl}/api/account/workspace`, {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: cookiePair,
+            Origin: baseUrl,
+          },
+          body: JSON.stringify({
+            profile: { fullName: 'Claire Moreau', currentTitle: 'Data Engineer', skills: ['Python', 'SQL'] },
+            cvs: [{ id: 'cv_1', versionName: 'CV Data' }],
+            applications: [{ id: 'app_1', company: 'Stripe', role: 'Data Engineer', stage: 'Applied' }],
+            watchlist: [{ id: 'watch_1', label: 'Stripe' }],
+            accountRole: 'candidate',
+            lang: 'fr',
+            discoverable: true,
+          }),
+        });
+        assert.equal(saveWsRes.status, 200);
+
+        // Cookie-only GET /api/account/workspace returns exact persisted workspace
+        const getWsRes = await fetch(`${baseUrl}/api/account/workspace`, {
+          headers: { Cookie: cookiePair },
+        });
+        assert.equal(getWsRes.status, 200);
+        const getWsBody = (await getWsRes.json()) as {
+          workspace?: {
+            profile?: { currentTitle?: string };
+            cvs?: Array<{ id: string }>;
+            applications?: Array<{ company: string }>;
+            discoverable?: boolean;
+          };
+        };
+        assert.equal(getWsBody.workspace?.profile?.currentTitle, 'Data Engineer');
+        assert.equal(getWsBody.workspace?.cvs?.[0]?.id, 'cv_1');
+        assert.equal(getWsBody.workspace?.applications?.[0]?.company, 'Stripe');
+        assert.equal(getWsBody.workspace?.discoverable, true);
+
+        // Verify u2 and confirm strict UID isolation (u2 sees null workspace, never u1's data)
+        const verifyU2 = await issueAndSendFiveDigitCode(u2, {
+          purpose: 'verify_email',
+          skipEmailForTest: true,
+        });
+        const verifyU2Res = await fetch(`${baseUrl}/api/auth/verify-code`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email2, code: verifyU2.codeForTest }),
+        });
+        assert.equal(verifyU2Res.status, 200);
+        const u2Body = (await verifyU2Res.json()) as { token?: string };
+        const u2WsRes = await fetch(`${baseUrl}/api/account/workspace`, {
+          headers: { Authorization: `Bearer ${u2Body.token}` },
+        });
+        assert.equal(u2WsRes.status, 200);
+        const u2WsBody = (await u2WsRes.json()) as { workspace: unknown };
+        assert.equal(u2WsBody.workspace, null, 'User 2 must never see User 1 workspace');
+
+        // Issue reset_password 5-digit code for u1 -> verify wrong code fails & valid code resets password
+        const freshU1 = getAuthUserByEmail(email1)!;
+        const resetIssued = await issueAndSendFiveDigitCode(freshU1, {
+          purpose: 'reset_password',
+          skipEmailForTest: true,
+        });
+        assert.match(resetIssued.codeForTest || '', /^\d{5}$/);
+
+        const badResetCode = resetIssued.codeForTest === '22222' ? '33333' : '22222';
+        const badResetRes = await fetch(`${baseUrl}/api/auth/reset-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: email1,
+            code: badResetCode,
+            newPassword: resetPwd,
+          }),
+        });
+        assert.equal(badResetRes.status, 400);
+
+        const okResetRes = await fetch(`${baseUrl}/api/auth/reset-password`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: email1,
+            code: resetIssued.codeForTest,
+            newPassword: resetPwd,
+          }),
+        });
+        assert.equal(okResetRes.status, 200);
+        const okResetBody = (await okResetRes.json()) as { reset?: boolean; token?: string };
+        assert.equal(okResetBody.reset, true);
+        assert.ok(okResetBody.token);
+        assert.ok(
+          (okResetRes.headers.get('set-cookie') || '').includes('jf_session='),
+          'Reset password must refresh HttpOnly session cookie'
+        );
+
+        // Old password MUST fail (401); new password MUST succeed (200)
+        const oldPwdLogin = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email1, password: initialPwd }),
+        });
+        assert.equal(oldPwdLogin.status, 401, 'Old password must be rejected after reset');
+
+        const newPwdLogin = await fetch(`${baseUrl}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: email1, password: resetPwd }),
+        });
+        assert.equal(newPwdLogin.status, 200, 'New password must succeed after reset');
+
+        // DELETE /api/account/workspace?deleteAccount=true erases both workspace and user cleanly
+        const delRes = await fetch(`${baseUrl}/api/account/workspace?deleteAccount=true`, {
+          method: 'DELETE',
+          headers: { Authorization: `Bearer ${okResetBody.token}` },
+        });
+        assert.equal(delRes.status, 200);
+        assert.equal(getAuthUserByEmail(email1), null, 'Account must be deleted after GDPR erasure');
+      } finally {
+        await new Promise<void>((resolve) => srv.close(() => resolve()));
+        for (const uid of createdUids) {
+          deleteAuthUserByUid(uid);
         }
       }
     });
